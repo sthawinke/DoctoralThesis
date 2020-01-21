@@ -1,0 +1,1353 @@
+---
+title: "Resample random null distributions for large scale simultaneous inference under dependence"
+author: |
+  | Stijn Hawinkel$^1$, Luc Bijnens$^{2,3}$ and Olivier Thas$^{1,3,4}$
+  | \hspace{5pt}
+  | $^1$ Department of Data Analysis and Mathematical Modelling, Ghent University, Belgium
+  | $^2$ Quantitative Sciences, Janssen Pharmaceutical companies of Johnson and Johnson, Belgium
+  | $^3$ National Institute for Applied Statistics Research Australia (NIASRA), University of Wollongong, Australia
+  | $^4$ Center for Statistics, Hasselt University, Belgium
+subtitle: Supplementary material
+output: 
+  pdf_document:
+    number_sections: true
+    keep_tex: yes
+    includes:
+            in_header: packagesFCM.sty
+bibliography: norm.bib
+---
+
+\beginsupplement{0}
+
+\tableofcontents
+
+```{r setup, echo = FALSE, message = FALSE}
+knitr::opts_chunk$set(cache = TRUE, autodep = TRUE, warning = FALSE, 
+                      message = FALSE, echo = FALSE, eval = TRUE, tidy = TRUE,
+                      fig.width = 9, fig.height = 6, purl = TRUE, 
+                      fig.show = "hold", fig.pos ="p")
+libs = c("phyloseq", "ggplot2", "parallel", "reshape2", "SpiecEasi", "KernSmooth", "locfdr",  "igraph", "SimSeq",
+         "RColorBrewer", "samr", "resample", "rransi", "MASS", "limma") #"Matrix", "fdrtool", "VGAM",
+for (i in libs){
+  library(i, character.only = TRUE, quietly = TRUE)
+};rm(i, libs)
+load("Datasets/FCraes.RData")
+load("Datasets/SeqRaes.RData")
+load("Datasets/CMETdata.RData")
+load("Datasets/lakesPhy.RData")
+load("Datasets/Rivett.RData")
+for(i in list.files("auxFun")){source(file.path("auxFun",i))};rm(i)
+options(digits = 3)
+nCores = 4L #The number of processors to use
+sample_data(lakesPhy)$cellDensity = with(sample_data(lakesPhy), {counts/volume*dilution})
+phyList = list("Props2016" = CMETwater, "Props2018" = lakesPhy, 
+               "Vandeputte2017" = Joined, "Rivett2018" = phyRivett)
+phyNames = c("Props2016" = "Props2016", "Props2018" = "Props2018",
+             "Vandeputte2017" = "Vandeputte2017", "Rivett2018" = "Rivett2018")
+groupVars = c("Props2016" = "Reactor.cycle", "Props2018" = "Lake", 
+              "Vandeputte2017" = "Health.status", "Rivett2018" = "Group")
+concVars = c("Props2016" = "cellDensity", "Props2018" = "cellDensity", 
+             "Vandeputte2017" = "absCountFrozen", "Rivett2018" = "bio.7")
+tests = c("wilcox.test" = "wilcox.test", "t.test" = "t.test")
+load("realResults/estparamList.RData")
+levelsPlot = c("BH", "theorFdr", "empFdr", "empAsymFdr", "BMAwFdr", "oracleFdr")
+labelsPlot = c("Benjamini-Hochberg", "Standard normal null", "Empirical null", "Asymetric empirical null", "Resample null", "Oracle null")
+FDRcol = "black"; mFDRcol = "blue"
+phyNames = c("Props2016" = "Props2016", "Props2018" = "Props2018",
+             "Vandeputte2017" = "Vandeputte2017", "Rivett2018" = "Rivett2018")
+sigLevel = 0.1 #The significance level
+```
+
+# Multiple testing correction and the false discovery rate
+
+## Simple statistical testing
+
+Statistical inference proceeds by formulating a hypothesis to test, gathering data and calculating a test statistic $T$ based on these data. The question is then whether the value of this test statistic is in compliance with the null hypothesis. Hence, in order to perform a statistical test, it is crucial to know the distribution that the test statistic would follow if the null distribution were true, i.e. the _null_ distribution. This null distribution ($g(T)$) can be asymptotic, exact or be approximated through a resampling procedure, such as permutation or bootstrap. No matter how the null distribution is determined, it can be used to convert the test statistics _T_ to a z-value using the following transformation \cite{Efron2001}:
+
+\begin{equation}
+Z = \Phi^{-1}(G(T))
+\label{supeq:transform}
+\end{equation}
+
+with $\Phi^{-1}()$ the standard normal quantile function and $G$ the null cumulative distribution function. For simplicity, in the remainder of the text it is assumed that all test statistics have been converted to z-statistics, although the methods presented also work for many other test statistics.
+
+For a single hypothesis and given a fixed significance level $\alpha$, significance is determined by comparison of the z-statistic with the quantiles of the standard normal null distribution. For instance, for a one-sided test, the null hypothesis H$_{0}$ is rejected when $Z \geq \Psi^{-1}(1-\alpha)$. This implies that when the null hypothesis $H_0$ is true, it is still rejected in 100$\times\alpha$\% of the cases. Hence $\alpha$ is also called the False Positive Rate (FPR).
+
+The p-value P$_j$ is defined as $1-\Psi(Z)$, and equals the FPR when rejecting the null hypothesis for any p-value equal to or smaller than P$_j$.
+
+## Multiple testing
+
+In contemporary biological research, often a large number ($p$) of features is measured for a smaller number ($n$) of samples. These features may be gene expression, species abundances, substrate concentrations or others. These measurements result in an $n \times p$ matrix **Y**, with element $y_{ij}$ the observed value of feature $j$ in sample $i$. In addition, an $n \times d$ matrix **X** may be available with baseline sample variables. Frequently, the scientific question of interest is to test a statistical hypothesis $H_j$ on every feature $j$, i.e. on every vector $\mathbf{y}_{.j}$. This statistical hypothesis may consider only $\mb{y}_{.j}$, or test the association of $\mathbf{y}_{.j}$ with one or more variables from **X**. Whichever statistical test is used, it yields one z-statistic Z$_j$ for every feature.
+
+Assume there are p$_0$ true null hypotheses, of which $V$ are declared significant, and $U$ hypotheses are declared non-significant, and call $\pi_0 = \frac{p_0}{p}$ the fraction of true null hypotheses. From the p-p$_0$ false null hypotheses, $G$ are declared significant, and $T$ are declared non significant. This is illustrated in the following _confusion matrix_:
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{l|cc|c}
+  \hline
+ & Null hypothesis true & Null hypothesis false & Total \\
+  \hline
+    Null hypothesis rejected & V & S & R \\
+    Null hypothesis not rejected &  U  & T & p-R \\
+  \hline
+    Total & p$_0$ & p - p$_0$ & p \\
+  \hline
+\end{tabular}
+\caption{Confusion matrix \label{tab:confMatrix}}
+\end{table}
+
+$R$ is an observable random variable, whereas _V_, _S_, _U_ and _T_ are unobservable random variables. As mostly $p>>\frac{1}{\alpha}$, simply performing each individual test at the $\alpha$ significance level leads to many false positives: $E(V) = p_0\alpha$. This is the _multiple testing problem_. Several procedures have been developed to control some measure of false rejections. 
+
+One of the oldest and most popular methods is the Bonferroni correction \cite{Bonferroni1936}. It aims to limit the chance of having at least one false positive, P(V $\geq$ 1), which is known as the family-wise error rate (FWER). The Bonferroni correction consists of testing each hypothesis on a significance level of $\frac{\alpha}{p}$ rather than $\alpha$. Although effective at controlling the FWER at level $\alpha$, it is a very conservative method when $p$ is large. As an alternative, \textcite{Benjamini1995} proposed to control the _false discovery proportion_.
+
+### The false discovery proportion
+
+The false discovery proportion (FDP) is defined as \cite{Benjamini1995}:
+
+\begin{equation}
+\text{FDP} = \frac{V}{R}
+\label{supeq:FDP}
+\end{equation}
+
+It is the fraction of rejected null hypotheses $R$ ("discoveries") for which the null hypothesis is in reality true. The FDP is a random variable, whose value is unique to every experiment. In experiments where many hypotheses are being tested ($p$ large), controlling the expected FDP is much less conservative than controlling the FWER. Rather than limiting the probability of making at least one false discovery, the researchers accepts a small but controlled probability that a discovery is false.
+
+### Definitions of the false discovery rate
+\label{supsec:defFDR}
+
+The expected FDP is commonly called the _false discovery rate_. Throughout the literature, slightly different definitions of the false discovery rate exist (see \cite{Tsai2003} for an extended discussion).
+
+1) \textcite{Benjamini1995} defined the False Discovery Rate (FDR) as
+
+\begin{equation}
+FDR = E(V/R|R>0)P(R>0)
+\label{supeq:FDR}
+\end{equation}
+
+The factor P(R>0) sets the FDR to 0 when no discoveries are made (R = 0).
+
+2) \textcite{Storey2003} defined the _positive_ FDR (pFDR) as 
+
+\begin{equation}
+pFDR = E(V/R|R>0)
+\label{supeq:pFDR}
+\end{equation}
+
+It is only defined when at least one discovery is made.
+
+3) \textcite{Tsai2003} defined the _marginal_ FDR (mFDR) as
+
+\begin{equation}
+mFDR = E(V)/E(R)
+\label{supeq:mFDR}
+\end{equation}
+
+4) and the empirical FDR (eFDR) as
+
+\begin{equation}
+eFDR = E(V)/r.
+\label{supeq:eFDR}
+\end{equation}
+
+With $r$ the realization of $R$.
+
+Definitions \eqref{supeq:pFDR} and \eqref{supeq:mFDR} are equivalent under weak dependence, i.e. when the dependence between the test statistics vanishes for large $p$ \cite{Storey2003, Storey2003b, Foster2008}. However, in general 
+
+\begin{equation}
+\begin{aligned}
+\Cov(\frac{V}{R}, R) &= E\big((E(\frac{V}{R})-\frac{V}{R})(E(R)-R)\big)\\
+&= E(E(\frac{V}{R})E(R)-E(\frac{V}{R})R-E(R)\frac{V}{R}+V)\\
+&= E(V) - E(\frac{V}{R})E(R)
+\end{aligned}
+\label{supeq:cov}
+\end{equation}
+
+\cite{Heijmans1999} such that
+
+\begin{equation}
+\frac{E(V)}{E(R)} = E\big(\frac{V}{R}\big) + \frac{\Cov(\frac{V}{R}, R)}{E(R)} = 0
+\label{supeq:FDRmFDR}
+\end{equation}
+
+thus the FDR, pFDR and mFDR are equivalent when the FDP and the total number of rejections $R$ are independent ($\Cov(\frac{V}{R}, R) = 0$), $p>p_0$ and at least one null hypothesis is rejected.
+
+Definitions \eqref{supeq:pFDR} and \eqref{supeq:mFDR} were rejected by \textcite{Benjamini1995} because they always equal to 1 when $p_0 = p$ \cite{Benjamini2010, Schwartzman2012}. Hence it would be impossible to control the false discovery rate when all null hypotheses are true with these definitions, as well as with \eqref{supeq:eFDR}. 
+
+Still the case $p_0 = p$ is very unlikely for large $p$ \cite{Storey2003}. In what follows we will assume that $p>p_0$ and $R>0$ and thus $FDR = pFDR$. Moreover, we argue that mFDR is a more useful property to control over all studies in a research domain. The first two definitions \eqref{supeq:FDR} and \eqref{supeq:pFDR} are based on the expectation of the ratio $V/R$. As such they allot equal weights to the FDP of every experiment, regardless of how many discoveries $R$ were made. The third definition \eqref{supeq:mFDR} is based on a ratio of expectations, and as such allots more weight to experiments with many discoveries $R$. Consequently, the mFDR reflects the proportion of false discoveries reported _in the whole literature_, rather than the average FDP in many different studies. This is clarified by the following numerical example. Imagine 2 independent studies being conducted in the same field, both testing 100 null hypotheses of which 80 are true. Study 1 rejects 30 hypotheses, of which 2 are true. Study 2 rejects 3 hypotheses, of which 1 is true. The true FDR over these two studies equals $\frac{(2/30+1/3)}{2} = 0.2$, whereas the true mFDR equals $\frac{(2+1)/2}{(30+3)/2} = \frac{2+1}{30+3} = 0.091$. Arguably, the second quantity is most relevant to researchers doing follow up research on all discoveries reported in the field. The mFDR most accurately reflects the reliability of these findings, as 9.1\% of all reported findings are false. 
+
+Moreover, weak dependence may not be a good assumption for datasets measuring intertwined biological systems. The correlations in the data are not spurious in this case and will persist even when more data are gathered.
+
+### Controlling the false discovery rate
+
+Several procedures exist to control or estimate the different false discovery rates. In case of false discovery rate _control_, the user chooses a certain proportion of false discoveries he is willing to accept, and accordingly chooses a rejection region $\Gamma$ for the test statistics __Z__. When the purpose is to _estimate_ the false discovery rate, the user specifies a certain rejection region, and then estimates the corresponding false discovery rate. See \textcite{Storey2002} for an extended discussion and relationship between both approaches. In this article our aim is to control the false discovery rate at a preset nominal level $\gamma$.
+
+#### Benjamini-Hochberg correction
+
+\textcite{Benjamini1995} developed the following procedure to control the FDR at a nominal level $\gamma$ given a set of p-values P$_1$, ..., P$_p$:
+
+\begin{enumerate}
+\item Order the p-values in ascending order: $P_{(1)} \leq ... \leq P_{(p)}$
+\item Find \[\hat{l} = \argmax_{1\leq l\leq p} \big[l: p_{(l)} \leq \gamma l/p)\big]\]
+\item Reject the hypotheses corresponding to $P_{(1)}, ..., P_{(\hat{l})}$. If no p-values satisfy the inequality, no hypotheses are rejected.
+\end{enumerate}
+
+This Benjamini-Hochberg (BH) correction guarantees $FDR \leq \gamma$ under positive regression dependence. Extensions to this approach have been suggested in case of dependence between test statistics to yield a more conservative procedure \cite{Benjamini2001}. This procedure can easily be modified to produce _adjusted_ p-values. The BH adjusted p-value equals
+
+\begin{equation}
+p_l^{BH} = \min(p_{(l)}p/l, p_{(l+1)}p/(l+1),1) 
+\label{supeq:adjPval}
+\end{equation}
+
+The FDR equals $\gamma$ when all hypotheses with adjusted p-values equal to or smaller than $\gamma$ are rejected \cite{Storey2003b}.
+
+The drawback of p-values is that they cannot distinguish results from two different tails of the null distribution, e.g. in a one-sided test.
+
+#### Storey's q-value
+
+\textcite{Storey2003b} proposed a method to estimate the pFDR for a given threshold value $z^*$ through Bayes' rule. When all test statistics $Z_j\geq z^*$ are rejected (taking a one-sided test as example), the estimated pFDR is
+
+\begin{equation}
+\widehat{pFDR}(z^*) = \frac{\hat{\pi}_0G^{-1}(z^*)}{F_{ecdf}(z^*)}
+\label{supeq:hatFDR}
+\end{equation}
+
+with $F_{ecdf}(z) = 1/p\sum_{j=1}^{p}I(Z_j \leq z)$ the empirical cumulative density function and $\hat{\pi}_0$ an estimate of the fraction of true null hypotheses (see Section \ref{supsec:estpi0}). The q-value of feature $j$ is then
+
+\begin{equation}
+q(Z_j) = \min_{Z_j \geq z\*}\widehat{pFDR}(z\*)
+\label{supeq:qvalue}
+\end{equation}
+
+The definition of the q-value explicitly takes into account that when calling feature $j$ for which $Z_j \in \Gamma$ significant, one should also call all other features with test statistics in $\Gamma$ significant, like the p-value but unlike the fdr (see below).  Equivalently to the interpretation of the BH adjusted p-value, the q-value gives the pFDR obtained by rejecting the null hypothesis for any test statistic with an equal or smaller q-value \cite{Storey2002}.
+
+#### Local false discovery rates
+
+\textcite{Efron2001} introduced the _local false discovery rate_ (fdr or lfdr). Central to this approach is the notion that the observed z-values in an experiment are a mixture of z-values from null hypotheses that are true and null hypotheses that are false:
+
+\begin{equation}
+f(z) = \pi_0f_0(z) + (1-\pi_0)f_a(z)
+\label{supeq:mixture}
+\end{equation}
+
+whereby $f(z)$ is the overall density of the ensemble of z-values of the experiment, $f_0(z)$ is the density of the null z-values and $f_a(z)$ the density of the z-values of false null hypotheses. The local false discovery rate is then, again invoking Bayes' rule
+
+\begin{equation}
+\begin{aligned}
+fdr(z) &= P(H_0|Z = z)\\ &= \frac{P(z|H_0)P(H_0)}{P(z)}\\ &= \frac{f_0(z)\pi_0}{f(z)}
+\end{aligned}
+\label{supeq:fdr}
+\end{equation}
+
+with $H_0$ indicating a true null hypothesis. Note that fdr(z) refers to a single value of the test statistic z, whereas FDP refers to the whole experiment and the definitions of the false discovery rate given in section \ref{supsec:defFDR} refer to expectations over many experiments. $fdr(z)$ need not be a unimodal function of z.
+
+This procedure requires the estimation of $f_0(z)$, $\pi_0$ and $f(z)$. $f(z)$ can be easily estimated from the ensemble of observed test statistics, e.g. using Poisson regression \cite{Efron2004}. For $f_0(z)$ a theoretical, asymptotic, permutation or empirical null distribution (see section \ref{supsec:empNull}) or some other type of external null information \cite{Efron2001} can be used. See section \ref{supsec:estpi0} for the estimation of $\pi_0$. As this approach is based on densities, it is only feasible when $p$ is sufficiently large \cite{Strimmer2008}, contrary to the BH correction. Note that as usually in frequentist statistics, the alternative density $f_a(z)$ is not of direct interest.
+
+Equivalently, the tail-area false discovery rate Fdr(z) \cite{Efron2002} is defined as
+
+\begin{equation}
+Fdr(z) = P(H_0|Z \leq z) = \frac{F_0(z)\pi_0}{F(z)}
+\label{supeq:tailFdr}
+\end{equation}
+
+for z-values in the lower tail and 
+
+\begin{equation}
+Fdr(z) = P(H_0|Z \geq z) = \frac{(1-F_0(z))\pi_0}{1-F(z)}
+\label{supeq:uppertailFdr}
+\end{equation}
+
+for z-values in the upper tail. For simplicity we will assume a one-sided test being performed and always use \eqref{supeq:tailFdr} in the remainder of the document. When F(z) is being estimated through an empirical cumulative density function $F_{ecdf}(z)$, \eqref{supeq:tailFdr} is an estimate of the cFDR, as for a given rejection point z$^*$, $F_{ecdf}(z^*)$ and thus $R$ are known. When F(z) is estimated as $\int_{-\infty}^z f(a)da$, expression \eqref{supeq:tailFdr} is an estimate of the mFDR. This is easily shown:
+
+\begin{equation}
+\begin{aligned}
+\frac{F_0(z)\pi_0}{F_{ecdf}(z)} &= \frac{F_0(z)\pi_0p}{F_{ecdf}(z)p} &= \frac{E(V)}{R}\\
+\frac{F_0(z)\pi_0}{F(z)} &= \frac{F_0(z)\pi_0p}{F(z)p} &= \frac{E(V)}{E(R)}
+\end{aligned}
+\label{supeq:proofmFDR}
+\end{equation}
+
+The Fdr is similar in interpretation to Storey's q-value \cite{Efron2002}. The local and tail area false discovery rates are related as density and distribution functions:
+
+\begin{equation}
+Fdr(z) = \int_{-\infty}^z fdr(z)dz
+\label{supeq:lowertail}
+\end{equation}
+
+in the lower tail and 
+
+\begin{equation}
+Fdr(z) = \int^{\infty}_z fdr(z)dz
+\label{supeq:uppertail}
+\end{equation}
+
+in the upper tail. When fdr(z) is a unimodal function, Fdr(z) $\leq$ fdr(z) \cite{Strimmer2008}. Under  certain conditions, equivalence between the BH procedure and the local false discovery procedures can be shown \cite{Efron2002}.
+
+<!-- The fdr can be seen as a version of the Fdr with an infinitesimally small rejection region $\Gamma$. -->
+
+\cnp
+
+# Multiple testing under dependence
+
+Dependence between test statistics may affect the performance of multiplicity correction methods \cite{Efron2007}. The effect of dependence between *hypotheses* has been discussed in a Bayesian framework \cite{Storey2003, Foster2008, Tsai2003}. Here we work in a frequentist framework, considering the veracity of the hypothesis as fixed and only investigating dependence structures in the data and test statistics derived from the data.
+
+## Dependence inflates the variability of the false discovery proportion
+
+The columns of __Y__ are often associated, e.g. due to co-expression of certain genes \cite{Stuart2003} or correlations between microorganisms living in the same niche \cite{Friedman2012, Kurtz2015}. As a result, also the test statistics __Z__ are correlated.
+
+```{r corZvaluesParams, eval = TRUE}
+p = 1000 # Number of variables
+n = 50 # Number of samples
+p0 = 0.75 #Fraction of true null hypotheses
+meanDif = 1.5 #The difference in means
+x = c(rep(FALSE,n/2), rep(TRUE,n/2)) # A grouping variable
+idFN = c(rep(FALSE, p*p0), rep(TRUE, p*(1-p0))) # An index of false null hypotheses
+# corStrenghts = list(c(-0.7, 0.1), c(-0.2,0.1), c(0,0), c(-0.1, 0.2), c(-0.1,0.7)) #Correlation strengths
+corStrengths = c(0, 0.375, 0.75)
+names(corStrengths) = corStrengths
+reps = 500L #Number of simulation runs
+```
+
+The effect of this dependence on the FDP is illustrated in the following simulation experiment. Normal data is generated for $p=`r p`$ features in $n=`r n`$ samples. The samples are split evenly into two groups, and in a fraction $1-\pi_0 = `r 1-p0`$ of the features, the mean is set to differ by $`r meanDif`$ between the groups. Pairwise correlations between two features are all set to 0, 0.375 or 0.75; in every case $`r reps`$ datasets are generated. All features are tested for association with the grouping factor using Wilcoxon rank sum test, and the p-values are corrected using the Benjamini-Hochberg correction. Finally for every simulation run, the FDP is calculated.
+
+```{r corZvalues, fig.cap  = "Boxplots of false discovery proportion (y-axis) under increasing correlation between the features of the response matrix (x-axis). Darkgreen dashed line indicates the nominal false discovery rate, black diamonds indicate the estimated FDR, blue diamonds the estimated mFDR. \\label{supfig:mvnormRes}"}
+fileMVsim = "simResults/mvSim.RData" #The file name to save the result
+if(!file.exists(fileMVsim)){
+mvSim = mclapply(mc.cores = nCores, integer(reps), function(i){
+testRes = lapply(corStrengths, function(Sd){
+  mat = makeZnorm(n = n, p = p, p0 = p0, FC = meanDif, 
+                  Sigma = makeSigma(p, Sd = Sd, random = FALSE)) #Build the matrix with correlated columns
+  pVal = apply(mat, 2, function(y){
+    wilcox.test(y~x)$p.value
+  })#Perform Wilcoxon rank sum test
+})
+sapply(testRes, function(tes){evaluatePerformance(tes, method = "BH", sigLevel = sigLevel, numSignif = TRUE,
+                    idDA = idFN)}) #Calculate the FDP
+})
+names(mvSim) = seq_len(reps)
+save(mvSim, file = fileMVsim)
+} else load(fileMVsim)
+moltZ = melt(mvSim, recursive = FALSE) # Some data wrangling
+names(moltZ) = c("Criterion", "corStrength", "value", "rep")
+moltZ$corStrength = factor(moltZ$corStrength)
+moltZFDP = moltZ[moltZ$Criterion == "FDP",]
+dfAverages = aggregate(data = moltZFDP, 
+                        value ~ corStrength, FUN = mean) #Diamonds for averages
+dfAveragesmFDR = getFdrWeights(moltZ, c("corStrength"))
+FDPvarPlot = ggplot(data = moltZFDP, aes(x = corStrength, y = value)) +
+  geom_boxplot(outlier.size = 1.25) +
+  geom_hline(yintercept = sigLevel, col = "darkgreen", linetype = "dashed") + 
+  geom_point(data = dfAverages, shape = 23, col = FDRcol, size = 2.5) +
+  geom_point(data = dfAveragesmFDR, shape = 23, col = mFDRcol, size = 2.5) +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12), axis.text = element_text(size = 11)) +
+  xlab("Correlation between features") + 
+  ylab("False discovery proportion")
+FDPvarPlot
+ggsave(plot = FDPvarPlot, filename = "Manuscript/Figures/FDPvarPlot.pdf", device = "pdf")
+```
+
+From Figure \ref{supfig:mvnormRes} it is clear that the correlation between the features causes the variability of the FDP to increase. In absence of correlation, the FDR and mFDR are almost identical and close to the nominal FDR, but as the correlation increases, the FDR decreases (as also observed by \cite{Schwartzman2012}) whereas the mFDR increases to above the nominal level. Remember that the BH multiplicity correction applied is designed to control the FDR, and not the mFDR.
+
+## The random null distribution
+
+```{r ranNull, fig.cap = "Histograms of z-statistics under the null hypothesis for three simulation runs without correlation (top) and three experiments with correlation(bottom). Red vertical line indicates 0, blue curve indicates standard normal density.\\label{supfig:ranNull}"}
+fileRanNull = "simResults/ranNull.RData" #The file name to save the result
+if(!file.exists(fileRanNull)){
+ranNull = mclapply(integer(reps), mc.cores = nCores, function(i){
+testRes = lapply(corStrenghts[c(1,3)], function(Sd){
+  mat = makeZnorm(n = n, p = p, p0 = p0, FC = 0L, Sigma = makeSigma(p, Sd)) #Build the matrix with correlated columns, under H0
+  wilcoxStats = apply(mat, 2, function(y){
+    wilcox.test(y~x)$statistic
+  })#Perform Wilcoxon rank sum test
+  zStat = qnorm(pwilcox(wilcoxStats, n/2, n/2))#Convert to z-values
+  })
+})
+save(ranNull, file = fileRanNull)
+} else load(fileRanNull)
+cex.axis = 1.2; cex.lab = 1.2; cex.main = 1.3
+par(mfcol = c(2,3))
+foo = lapply(8:10, function(xx){
+  histOverlay(ranNull[[xx]][[1]], main = "No correlation", cex.axis = cex.axis, cex.lab = cex.lab, cex.main = cex.main)
+  histOverlay(ranNull[[xx]][[2]], main = "With correlation", cex.axis = cex.axis, cex.lab = cex.lab, cex.main = cex.main)
+})
+foo2 = dev.print(pdf, "Manuscript/Figures/ranNull.pdf")
+par(mfcol = c(1,1))
+```
+
+```{r avNull, fig.cap = "Histogram of test statistics of correlated data, pooled over all simulation runs. Red vertical line indicates 0, blue curve indicates standard normal density. \\label{supfig:avNull}"}
+#Pool all test statistics and make a histogram
+hist(sapply(ranNull, function(x){x[[2]]}), freq = FALSE, breaks = 30, 
+     xlab = "z-values", xlim = c(-3.5, 3.5), main = "")
+abline(v = 0, col = "red")
+lines(x = seq(-4, 4, by = 0.1), y = dnorm(seq(-4, 4, by = 0.1)), col = "blue")
+```
+
+The explanation for this phenomenon lies in the random nature of the null distribution of the ensemble of test statistics __Z__ within a single experiment. The marginal null distributions g$_j$ of each of the test statistics $Z_j$ are known to be standard normal by definition \eqref{supeq:transform}:
+
+\begin{equation}
+Z_j \sim N(0,1),
+\label{supeq:standNorm}
+\end{equation}
+
+such that all $g_j(z_j) = \psi(z_j)$ with $\psi$ the standard normal density function.
+
+Their joint distribution is given by the multivariate standard normal distribution:
+
+\begin{equation}
+\mb{Z} \sim MVN(\mb{0}, \bs{\Sigma})
+\label{supeq:mvnorm}
+\end{equation}
+
+with $\bs{\Sigma}$ an unknown covariance matrix. This joint distribution can be factorized as follows:
+
+\begin{equation}
+g(z_1, ..., z_p) = g_1(z_1|z_2,...,z_p) \times g_2(z_2|z_3,...,z_p) \times ... \times g_{p-1}(z_{p-1}|z_p) \times g_p(z_p)
+\label{supeq:condJoint}
+\end{equation}
+
+The ordering of the conditioning is of no importance. This factorization suggests a sequential generation of the test statistics: one can think of z$_p$ being the first test statistic to be drawn, then z$_{p-1}$ conditional on z$_p$ and so on. The z-values observed within a single experiment are drawn from this "collapsed" null distribution: an even mixture of these $p-1$ conditional and 1 marginal distributions.
+
+When all test statistics are independent, i.e. $\bs{\Sigma} = \mb{I}_p$ in \eqref{supeq:mvnorm} with $\mb{I}_p$ the identity matrix of dimension $p$, this expression simplifies as follows:
+
+\begin{equation}
+\begin{aligned}
+g(z_1, ...,z_p) &= g_1(z_1|z_2,...,z_p) \times g_2(z_2|z_3,...,z_p) \times ... \times g_{p-1}(z_{p-1}|z_p) \times g_p(z_p)\\
+&= g_1(z_1) \times g_2(z_2) \times ... \times g_{p-1}(z_{p-1}) \times g_p(z_p)\\
+&= \psi(z_1) \times \psi(z_2) \times ... \times \psi(z_{p-1}) \times \psi(z_p)
+\label{supeq:condJoint2}
+\end{aligned}
+\end{equation}
+
+In this case all z-statistics are i.i.d. standard normal variables, such that the collapsed null is an even mixture of marginal standard normal distributions, which is in turn standard normal, as in the top figures of \ref{supfig:ranNull}
+
+However, when there is dependence between the test statistics, in general $g_z(z|z') \neq g_z(z) = \psi(z)$, so the conditional distributions are not standard normal. The z-values are still marginally identically distributed but no longer independent. As a result the collapsed null distribution is no longer standard normal. Moreover, the collapsed null distribution is no longer a constant function, but a random function that varies over the different experiments. Returning to the sequential generation of test statistics, as a different value for z$_p$ is drawn, another distribution is used to draw $z_{p-1}$, and so on for all other test statistics. Hence the shape of the joint distribution depends on a series of random draws. We reiterate that the order of the conditioning does not matter, one could condition on any z$_j$. We call this random collapsed null density $h(\mb{z})$ with corresponding distribution function $H(\mb{z})$ (both are random functions, but we stick to the lower case-upper case convention for density and distribution functions). When the test statistics are not independent, $h(\mb{z})$ is still a normal density, but shifted left or right (with mean smaller than or larger than 0) and narrowed or widened (standard deviation smaller than or larger than 1) \cite{Efron2007, Efron2004}.
+
+From Figure \ref{supfig:ranNull} it is easy to see how this random null distribution leads to an inflation of the variability of the FDP. When the random null distribution widens and/or shifts, many extreme test statistics are present under the null hypothesis. This will in turn lead to many small p-values, and a FDP larger than the nominal level. Conversely, when the random null distribution is narrower than the standard normal, there are less small p-values and a lower FDP.
+
+This figure also explains why the FDR and the mFDR diverge when the dependence between test statistics becomes stronger. When the null distribution is wide and/or off center, many discoveries $R$ are made, of which many are false ($FDP = V/R$ large). Hence the dependence between test statistics leads to $\Cov(FDP, R) > 0$ (demonstrated in Figure \ref{supfig:scatterFDPvsR}), such that mFDR > FDR according to \eqref{supeq:FDRmFDR}.
+
+```{r scatterFDRmFDR, fig.cap = "Scatterplot of false discovery proportion versus total number of discoveries. Top labels indicate strength of correlation between the features of the data.\\label{supfig:scatterFDPvsR}"}
+mvSimMat = aggregate(formula = value~Criterion,data = moltZ,  FUN = identity)
+rownames(mvSimMat$value) = levels(moltZ$Criterion)
+dfScatter = data.frame(t(mvSimMat$value), corStrength = rep(corStrengths, times = reps))
+
+ggplot(data = dfScatter, aes(x = pos, y = FDP)) + 
+  facet_grid(cols = vars(corStrength)) + geom_point() + theme_bw() +
+  xlab("Total number of discoveries") + ylab("False discovery proportion")
+```
+
+The expectation of the random function $h(\mb{z})$ over many repeated experiments with index k = 1, ..., K is
+
+$$E_k(h_k(\mb{z})) = MVN(\mathbf{0}, \mathbf{I}_p),$$
+i.e. the average null distribution over many simulation runs equals the standard normal \cite{Efron2007, Efron2008}. Factorization \eqref{supeq:condJoint} clarifies this: by repeating the experiment many times, many z$_p$ values are drawn from $f_p(z_p)$ Hence we are effectively integrating z$_p$ out of the conditional distribution $f_{p-1}(z_{p-1}|z_p)$, thus obtaining the marginal distribution $\int f_{p-1}(z_{p-1}|z_p)f(z_p)dz_p = f_{p-1}(z_{p-1})$. This holds true for all conditional densities, such that in the end the average joint distribution is the product of all marginals. The _average_ random null distribution is then an even mixture of independent standard normal variables, and thus in turn again standard normal, as demonstrated in Figure \ref{supfig:avNull}.
+
+\cnp
+
+# Estimating the random null distribution
+
+To tackle the increased variability of the FDP, it is necessary to obtain better estimate the random null distribution $h(\mb{z})$. The aim is to condition on (the test statistics of) the current experiment and estimate $h_k(\mb{z})$ (with $k$ an experiment indicator) rather than $E_k(h_k(\mb{z}))$. This is similar to testing null hypotheses on contingency tables with e.g. Fisher's exact test: the null distributions used are conditional on the margins and thus on the data \cite{Efron2007}. External sources of null information as in \cite{Efron2001} are not always available and may be unable to capture the dependence between the observed test statistics.
+
+## The empirical null
+\label{supsec:empNull}
+
+\textcite{Efron2004} proposed to estimate the random null distribution from the central part of the observed z-value histogram. The reasoning is that in the center of the histogram, most z-values belong to true null hypotheses. Estimating their density should then lead to an unbiased estimate of $h_k(\mb{z})$, conditional on the current experiment. The estimation proceeds through maximum-likelihood under the normality assumption \cite{Efron2004, Turnbull2007}.
+
+The drawback of this approach is that the definition of the 'center of the histogram' is somewhat arbitrary. Setting hard borders delimiting this center possibly excludes null z-values, which increases the variability of the estimator, or includes non-null z-values, which can bias the estimator. In addition, this approach only works when $\pi_0$ is close to 1 \cite{Turnbull2007}.
+
+## The resampling random null estimated through bayesian model averaging
+\label{supsec:resampNull}
+
+Here we propose to estimate the random null distribution through resampling. The advantage of our resampling scheme is that it retains the correlation structure among the columns of __Y__ as well as __X__. This renders our method widely applicable since it makes no assumptions on the nature of the correlation structures of __Y__ and __X__ and obviates the need to estimate this correlation.
+
+### The resampling scheme
+
+\label{supsec:resamplingScheme}
+
+Hypotheses being tested on each column $\mb{y}_{.j}$ can consider association with a subset of the columns of __X__, called $\mb{X}'$, e.g. in a regression model. In this case, following permutation scheme is used. Rows of $\mb{X}'$ are resampled without replacement (permuted) to obtain $\mb{X}'^*$, and then statistical tests are performed on the columns of the original data matrix __Y__ for association with the variables in $\mb{X}'^*$, possibly accounting for other variables in __X__ \\ $\mb{X}'$. By breaking the relationship between the outcome variable and the regressors of interest, the resulting test statistics are being calculated under the null hypothesis.
+
+Alternatively hypotheses being tested can consider exclusively the columns $\mb{y}_{.j}$, possibly conditioning on some variables from __X__, e.g. when performing a one-sample t-test. In this case a bootstrap resampling procedure is indicated. First it may be necessary to transform the matrix __Y__ to fulfill the null hypothesis, e.g. subtracting a hypothesized mean. Next, rows of __Y__ and __X__ are jointly resampled with replacement to obtain resampled matrices __Y__\* and __X__\*.  The statistical test is then applied to these resampled matrices.
+
+The number of samples $n$ needs to be sufficiently large to provide sufficient distinct resamples. The number of distinct bootstrap samples equals $\binom{2n-1}{n-1}$, such that a sample size of 7 or 8 should be sufficient. The number of unique permutations depends on the number of unique rows in __X__', and their distribution. For instance, when testing for association of $\mb{y}_{.j}$ with an evenly distributed grouping factor with two levels, the number of unique permutations equals $\binom{n}{n/2}$. In what follows we will assume that the number of unique resamples is large enough to eliminate all sampling error, as with other resampling procedures. The total number of resamples performed is $B$, with $\mb{Z}_b$ the vector of test statistics from the $b$-th resampling instance. In any case, only unique resampling instances will be considered.
+
+### Bayesian model averaging
+
+On every set of $\mb{Z}_b$, a normal distribution is fit using maximum likelihood to obtain the resample null distribution $\hat{f}_{b}(z)$. As mentioned above, simply averaging these null distribution will yield the standard normal distribution.
+
+Suppose that it was known which hypotheses are true and which ones are not. Then let $\mb{Z}_{0k}$ represent the vector of observed test statistics belonging to true null hypotheses in experiment $k$. To avoid overloading the notation we will drop the subscript $k$ in what follows, all formulas refer to a single experiment $k$. The idea is to condition on the current experiment through the vector of observed test statistics $\mb{Z}_0$, in order to estimate the conditional expectation of $h = E(f_b|\mb{Z}_{0}) = \int f_bP(f_b|\mb{Z}_0)df_b$:
+
+\begin{equation}
+\hat{h} = \sum_{b=1}^B \hat{f}_bP(\hat{f}_b|\mb{Z}_0)
+\label{supeq:weightedAverage}
+\end{equation}
+
+The conditional probabilities are, through Bayes' rule:
+
+\begin{equation}
+P(\hat{f}_b|\mb{Z}_0) = \frac{P(\hat{f}_b)P(\mb{Z}_0|\hat{f}_b)}{P(\mb{Z}_0)}
+\label{supeq:condProbs}
+\end{equation}
+
+_A priori_, all resampling distributions are equally likely: $P(\hat{f}_1) = ... = P(\hat{f}_B)$. Hence
+
+\begin{equation}
+P(\hat{f}_b|\mb{Z}_0) \propto P(\mb{Z}_0|\hat{f}_b)
+\label{supeq:propto}
+\end{equation}
+
+$P(\mb{Z}_0|\hat{f}_b)$ is the likelihood of the observed test statistics under the $b$-th resampling distribution, namely $\sum_{z \in \mb{Z}_0}\hat{f}_b(\mb{Z}_0)$. Expression \eqref{supeq:weightedAverage} can then be replaced by
+
+\begin{equation}
+\begin{aligned}
+\hat{h} &= \sum_{b=1}^B \hat{f}_b \frac{P(\mb{Z}_0|\hat{f}_b)}{\sum_{b=1}^BP(\mb{Z}_0|\hat{f}_b)}\\
+\hat{h} &= \sum_{b=1}^B \hat{f}_b w_b(\mb{Z}_0, \hat{f}_b)
+\end{aligned}
+\label{supeq:weightedAverage2}
+\end{equation}
+
+ $w_b(\mb{Z}_0, \hat{f}_b) = \frac{P(\mb{Z}_0|\hat{f}_b)}{\sum_{b=1}^BP(\mb{Z}_0|\hat{f}_b)}$ is the model weight of model $\hat{f}_b$, with $\sum_{b=1}^B w_b(\mb{Z}_0, \hat{f}_b) = 1$. This strategy of weighing different models f$_b$ to obtain a final consensus model is known as Bayesian model averaging (BMA) \cite{Buckland1997}. Intuitively, more weight is being allotted the resample distributions that are likely to have generated $\mb{Z}_0$. It is easy to show that this model averaging approach is equivalent to one that uses weights proportional to the Kullback-Leibler divergence (KLD) of the resampling distributions $\hat{f}_b$ from $\mb{Z}_0$.
+
+In order to leverage the normality of the random null, the null distribution is not estimated according to \eqref{supeq:weightedAverage2}, but rather through weighted maximum likelihood of the Gaussian distribution. The mean $\mu$ and standard deviation $\sigma^2$ are estimated as:
+
+\begin{equation}
+\begin{aligned}
+\hat{\mu} &= \frac{pB}\sum_{b=1}^B \sum_{j=1}^p Z_{jb}w_b\\
+\hat{\sigma}^2 &= \frac{1}{p-1}\sum_{b=1}^B \sum_{j=1}^p (Z_{jb}-\hat{\mu})^2w_b
+\end{aligned}
+\label{supeq:normalNull}
+\end{equation}
+
+with f$_N$ the normal density such that $\hat{h}(z) = f_N(z|\hat{\mu}, \hat{\sigma}^2)$. In practice, the difference between the estimates from \eqref{supeq:weightedAverage2} and \eqref{supeq:normalNull} is negligible.
+
+### Estimating the false discovery rate
+
+The overall density f(z) is estimated using kernel density estimation \cite{Wand2015}. Estimation of $\pi_0$ is discussed in section \ref{supsec:estpi0}. Using these three estimates, the local and tail area false discovery rates can now be estimated as in \eqref{supeq:fdr} and \eqref{supeq:tailFdr}:
+
+\begin{equation}
+\begin{aligned}
+\widehat{fdr}(z) &= \frac{\hat{h}(z)\hat{\pi}_0}{\hat{f}(z)}\\
+\widehat{Fdr}(z) &= \frac{\hat{H}(z)\hat{\pi}_0}{\hat{F}(z)}
+\end{aligned}
+\label{supeq:estFdr}
+\end{equation}
+
+For $\hat{H}(z)$ it is also possible to use the empirical cumulative distribution function (ecdf) $F_{ecdf}(z)$ as in \cite{Efron2007}. However, here $\hat{H}(z)$ is calculated based on the kernel density estimate $\hat{h}(z)$ to achieve a smooth function $\widehat{Fdr}(z)$, and our methods aims to control the mFDR.
+
+### Weighted likelihoods
+
+Obviously, in reality the correctness of the statistical hypotheses is not known. Still some collection of null z-values is needed to evaluate the likelihoods $P(\mb{Z}_0|f_b)$. One way to achieve this would be to use some central part of the observed z-value distribution as in Section \ref{supsec:empNull}. However, this puts a hard border between z-values within the central region which are considered to belong to true null hypotheses, and z-values outside this region which are considered to belong to false null hypotheses. Instead we propose to use the information in $\widehat{fdr}(z)$ to weigh the contributions of the z-values to the likelihood $f_b(\mb{Z})$ in a more continuous way. $\widehat{fdr}(z)$ reflects the estimated probability that the null hypothesis is true for a certain value of $z$, see \eqref{supeq:fdr}. Hence it can be used as weights when evaluating the likelihood $P(\mb{Z}_0|f_b)$: the more certain the z-value is to come from a true null hypothesis, the more weight it receives in the estimation of the null density. This concept is known as weighted likelihood \cite{Hu2002, Wang2005}. The weighted likelihoods are then calculated as:
+
+\begin{equation}
+P(\mb{Z}|f_b, \widehat{fdr}) = \sum_{j=1}^pf_b(z_j)^{\widehat{fdr}(z_j)}
+\label{supeq:weigthedLH}
+\end{equation}
+
+### Estimating the proportion of null features
+\label{supsec:estpi0}
+
+It is well known that the power of FDR procedures can be improved using an estimate of the proportion of null taxa $\pi_0$ \cite{Storey2003b, Benjamini2001}. If the prior $\pi_0$ is estimated from the test statistics, this is an example of an *empirical Bayes* procedure \cite{Efron2001}. In the most conservative case it can be assumed that $\pi_0 = 1$, as in \textcite{Benjamini1995}. A plethora of estimation methods for $\pi_0$ exist, see \textcite{Dialsingh2017} for an overview. Here we adopt the approach by \textcite{Storey2003b}, which works as follows:
+
+1) Define a number of equally spaced probabilities __q__: [q$_1$, ..., q$_M$] with all 0<q$_m$<0.5
+2) Find the corresponding quantiles of the null density $\mathbf{R}_m$ = [$\hat{H}^{-1}$(q$_m$), $\hat{H}^{-1}$(1-q$_m$)]
+3) Find corresponding estimates of p$_0$ by comparing the observed and expected number of z-values in this range
+$$\hat{p}_0^m = \frac{1/p \sum_{j=1}^p I(z_j \in R_m)}{1-2q_m}$$
+4) Fit a natural cubic spline $\kappa$ through (__q__, $\hat{\mathbf{p}}_0$)
+5) Use min($\kappa(q^*$),1) as estimate for p$_0$. The smaller q$^*$ is chosen, the less biased the estimate will be, as closer to the center of the distribution there is almost no contamination of non-null z-values. However, for small values of q$^*$ the variance increases. We set q$^*$ at 0.05, as in the _qvalue_ package \cite{qvalue}.
+
+This procedure was found to be one of the top performers in \cite{Dialsingh2017}. The main drawback of estimating p$_0$ is that the variability of the estimator $\hat{p}_0$ may increase the variability of the FDP.
+
+### An iterative algorithm
+
+The estimation equations for $\pi_0$, $fdr(z)$ and $h(z)$ all rely on knowledge of at least one of the other quantities. Hence the estimation occurs iteratively. The entire multiple testing correction procedure is shown below:
+
+1. Perform a statistical test for every column of __Y__, and obtain test statistics $T_j$.
+2. Resample rows from __Y__ and/or __X__ $B$ times and calculate corresponding resample test statistics $T_j^b$.
+3. Convert all test statistics to z-statistics $Z_j = \Psi^{-1}\big(F_j(T_j)\big)$ and $Z_j^b = \Psi^{-1}\big(F_{jb}(T_j^b)\big)$.
+4. Estimate $f(z)$ from __Z__ <!--and each $f_b(z)$ from $\mb{Z}_b$---> through kernel density estimation.
+5. Set $\hat{p}_0 = 1$ and $\widehat{fdr}(Z_j) = I(Z_j \in [q_{0.25}, q_{0.75}])$, with $q_{0.25}$ and $q_{0.75}$ the first and thirds quartiles of __Z__, as starting values.
+6. Calculate model weights $w_b(\widehat{fdr}(z), f_b, \mb{Z})$ using equations \eqref{supeq:weightedAverage2} and \eqref{supeq:weigthedLH}.
+7. Estimate $\hat{h}$ using weighted maximum likelihood of the Gaussian distribution on {$\mb{Z}_1, ..., \mb{Z}_B$} using $w_b$ as weights.
+8. Estimate $\widehat{fdr}(z_j) = \min\Big(\frac{\hat{h}(z_j)\hat{\pi}_0}{\hat{f}(z_j)}, 1\Big)$.
+9. Estimate $\hat{\pi}_0(\hat{h}, \mb{Z})$ using the procedure described in \ref{supsec:estpi0}.
+10. Repeat steps 6-9 until convergence. Convergence is assumed when the squared change in $\hat{\pi}_0$ and the square root of the mean squared change in $\widehat{fdr}(\mb{Z})$ are both smaller than 10$^{-8}$.
+11. Estimate F(z) as $\int_{-\infty}^z f(z)dz$ or $\int^{\infty}_z f(z)dz$, and calculate $\widehat{Fdr}(\mb{Z})$
+12. Do inference based on $\widehat{Fdr}(\mb{Z})$ and $\widehat{fdr}(\mb{Z})$.
+
+The estimation procedure is illustrated in Figure \ref{supfig:graph}.
+
+```{r graphIllustr, fig.cap = "Graphical illustration of the estimation of the random null distribution through resampling. The histogram of the observed test statistics is shown in green. The dashed line represents the standard normal null. The dashed yrllow and blue curves represent the estimated resample normal densities, with blue indicating a larger weight in the Bayesian model averaging. The full black line represents the resulting estimate of the random null distribution. The red dots show the observed test statistics, their vertical position reflects their estimated Fdr. The black dot-dashed line shows the estimated fdr. \\label{supfig:graph}"}
+fileIllustr = "results/pransiFit.RData"
+if(!file.exists(fileIllustr)){
+mat = makeZnorm(n = n, p = p, p0 = p0, FC = meanDif, 
+                  Sigma = makeSigma(p, Sd = 0.5, random = FALSE))
+pransiFit = rransi(mat, x = x, B = 1000L)
+save(pransiFit, file = fileIllustr)
+} else {load(fileIllustr)}
+plotNull(pransiFit)
+foo = ggsave("Manuscript/Figures/illustr.pdf")
+```
+
+## Remarks on the use of the random null distribution
+
+### Visualizing the correlation between test statistics
+
+The resampling scheme and resulting test statistics can also be used to approximate and visualize the correlation between the test statistic.
+For this purpose, all vectors of z-values $\mathbf{Z_b}$ are binned into 82 equally sized bins running from -4.1 to 4.1, and two additional bins for smaller and larger z-values. Call $\mathbf{U_b}$ (a vector of length k=84) the resulting bin counts in permutation $b$. Then the covariance matrix __C__ between these bin counts can be estimated as:
+
+$$\mb{C} = \frac{1}{B-1}\sum_{b=1}^B (\mathbf{C_b} - \mathbf{C_.})(\mathbf{C_b}-\mathbf{C_.})^T$$
+
+with $\mathbf{C_.} = \frac{1}{B}\sum_{b=1}^B \mathbf{C_b}$. $\mathbf{C_.}$ is not the correlation matrix of the $p$ test statistics, but of the bin counts. As such it provides a rough impression of the correlation structure of the test statistics. As predicted by \textcite{Efron2007}, the tail and central bin counts are negatively correlated for correlated data (see Figure \ref{supfig:Cperm}). The weak negative correlation between the bin counts for uncorrelated data is compatible with that under a multinomial distribution, which means it results from the binning.
+
+Note that our method for multiplicity correction does not require assumptions or estimation of the correlation structure, but figures like Figure \ref{supfig:Cperm} can provide insight into this correlation structure.
+
+```{r showSome, fig.cap = "Top: Correlation matrices of bin counts without correlation between the features. Bottom: With correlation between features. X and Y-axes show values of the test statistics, colours reflect correlation of the corresponding bin counts. Yellow indicates negative correlation, blue positive correlation. \\label{supfig:Cperm}"}
+fileCorMats = "simResults/corMats.RData" #The file name to save the result
+repsC = 3; corStrengthsC = c(0,0.75); BC = 200L
+if(!file.exists(fileCorMats)){
+corMatsRes = lapply(integer(repsC), function(i){
+  lapply(corStrengthsC, function(Sd){
+    mat = makeZnorm(n = n, p = p, p0 = p0, FC = meanDif, 
+                  Sigma = makeSigma(p, Sd = Sd, random = FALSE)) #Build the matrix with correlated columns
+    getCperm(rransi(mat, x, B  = BC)$statsPerm)
+  })
+})
+names(corMatsRes) = seq_len(repsC)
+save(corMatsRes, file = fileCorMats)
+} else load(fileCorMats)
+rgPalette = colorRampPalette(c("yellow","blue"))(12)
+par(mfcol = c(2,3))
+id = nrow(corMatsRes[[1]][[1]]):1
+foo = lapply(seq_len(repsC), function(i){
+  Range = range(c(corMatsRes[[i]][[1]], corMatsRes[[i]][[2]]))
+  image(z = corMatsRes[[i]][[1]][id,], col = rgPalette, zlim = Range, main = "Without correlation", 
+         x = seq(-4.2, 4.2, 0.1), y = seq(-4.2, 4.2, 0.1), xlab = "", ylab = "")
+  image(z = corMatsRes[[i]][[2]][id,], col = rgPalette, zlim = Range, main = "With correlation", 
+        x = seq(-4.2, 4.2, 0.1), y = seq(-4.2, 4.2, 0.1), xlab = "", ylab = "")
+  })
+par(mfcol = c(1,1))
+```
+
+<!-- ### Resampling nulls and unmeasured confounders -->
+
+<!-- \textcite{Efron2004} noted that the used of simple permutations is problematic in case of random confounders. Indeed, random confounding effects have been quoted as a cause of the overdispersion of the collapsed random null with respect to the marginal null distribution \cite{Efron2004, Efron2007}. Our procedure will, however, implicitly account for the effect of these confounders, as their effect remains present throughout the resamples -->
+
+<!-- This is illustrated using the following simple simulation example, similar to section 4 in \cite{Efron2004}. Data are generated from the following generative model for i = 1, ..., n = 50 samples and j = 1, ..., p = 1000 features: -->
+
+<!-- \begin{equation} -->
+<!-- \begin{aligned} -->
+<!-- Y_{ij} \sim N(\mu_{ij}, 1)\\ -->
+<!-- \mu_{ij} = \beta_{0j} + \beta_{j}x_{i}\\ -->
+<!-- \beta_{j} \sim N(0, 2/n)\\ -->
+<!-- \end{aligned} -->
+<!-- \label{supeq:genModel} -->
+<!-- \end{equation} -->
+
+<!-- $x_{i}$ is a known grouping variable defining two equally sized groups. On average, the null hypothesis is true for all features since $\beta$ is random with mean 0. Inference is performed using the theoretical standard normal collapsed null, with as cumulative distribution function both the marginal permutation null and the theoretical t-distribution, and using our resampling procedure. The null hypotheses tested are $H_0: \beta_{j} = 0$ The data generation is repeated for 100 Monte-Carlo instances. -->
+
+```{r unmeasuredConfounders, eval = FALSE}
+#Set the parameters
+p = 1000L #The number of features
+n = 50L #The number of samples
+sigma2 = 1 #The standard deviation of the error term
+sigma2b = 5/n #The standard deviation of the confounder parameter
+reps = 100L #The number of Monte-Carlo instances
+beta0 = 0 #The baseline mean
+x = rep(c(0,1), each = n/2) #Generate a grouping factor
+betaFixed = rnorm(p, sd = sqrt(sigma2b))
+meanMatFixed = cbind(1, x) %*% rbind(beta0, betaFixed)
+p0 = 0.8 #The average fraction of true null hypotheses
+B = 500L #The number of permutations
+#Define the testing function
+tFun =  function(y, x) summary(lm(y ~ x-1))$coef[2, "t value"]
+unmConfTestFun = function(Y, x, permute = FALSE, nPerms){
+  #Observed test statistic
+  tStatObs = apply(Y, 2, tFun, x = x)#Just use lm
+  if(permute){
+    #permute
+    permCoefs = lapply(integer(nPerms), function(i){
+      apply(Y[sample(nrow(Y)),], 2, tFun, x = x)
+    })
+    cdf = mapply(tStatObs, permCoefs, FUN = function(fitCoef, permCoef){
+      mean(fitCoef <= permCoef)
+    })
+  } else {
+    #Asymptotic t-distribution
+    cdf = sapply(tStatObs, function(fitCoef){
+      pt(fitCoef, df = n-ncol(x))
+    })
+  }
+  zVals = qnorm(cdf) #Z-values
+  return(zVals)
+}
+unmConfFile = "simResults/unmConf.RData"
+
+if(!file.exists(unmConfFile)){
+unmConf = mclapply(mc.cores = nCores, integer(reps), function(i){
+  #Sample parameters
+  beta = rnorm(p, mean = 0, sd = sqrt(sigma2b)) #Sample feature parameters
+  #beta1Sam = 0#sample(c(rep(0, round(p*p0)), rep(beta1, round(p*(1-p0))))) #The group effect
+    #Design
+  Design = cbind("intercept" = 1, "group" = x)
+  meanMatRandom = Design %*% rbind(beta0, beta) #The mean matrix
+  
+  #Generate the data
+  Yrandom = matrix(rnorm(n*p, mean = meanMatRandom, sd = sigma2), n, p)
+  Yfixed = matrix(rnorm(n*p, mean = meanMatFixed, sd = sigma2), n, p)
+
+  #Model fits
+  ## Naive fits
+  zValsFixedTheor = unmConfTestFun(Yfixed, Design)
+  fitFixedResam = rransi(Yfixed, Design, test = "tFun", B = B)
+  #zValsFixedPerm = unmConfTestFun(Yfixed, Design, permute = TRUE, nPerms = B)
+  zValsFixedPerm = qnorm((rowSums(fitFixedResam$statObs > fitFixedResam$statsPerm)+1)/(B+2))
+  ## Fits with confounder
+  zValsRandomTheor = unmConfTestFun(Yrandom, Design)
+  #zValsRandomPerm  = unmConfTestFun(Yrandom, Design, permute = TRUE, nPerms = B)
+  fitRandomResam = rransi(Yrandom, x = Design, test = "tFun", B = B)
+  zValsRandomPerm = qnorm((rowSums(fitRandomResam$statObs > fitRandomResam$statsPerm)+1)/(B+2))
+  return(list("resmat" = cbind(FixedTheor = zValsFixedTheor, FixedPerm = zValsFixedPerm, 
+               randomTheor = zValsRandomTheor, randomPerm = zValsRandomPerm),
+              "fitFixedResam" = fitFixedResam, "fitRandomResam" = fitRandomResam))
+})
+save(unmConf, file = unmConfFile)
+} else {load(unmConfFile)}
+FdrMatsList = lapply(unmConf, function(res){
+  with(res, cbind(apply(resmat, 2, function(x){
+    getTheorFdr(x, zValsDensObs = dnorm(seq(-6,6,0.01)), zSeq = seq(-6,6,0.01))$Fdr}),
+    "FixedResam" = fitFixedResam$Fdr, "RandomResam" = fitRandomResam$Fdr   
+  ))
+})
+FDRestList = sapply(FdrMatsList, function(x){colMeans(x<sigLevel)})
+boxplot(t(FDRestList))
+
+j = 2
+par(mfrow = c(2,2))
+foo = lapply(colnames(unmConf[[j]]$resmat), function(i){histOverlay(unmConf[[j]]$resmat[, i], main = i)})
+par(mfrow = c(1,1))
+```
+
+### Discrete null distributions
+
+Discrete null distributions pose problems in many statistical applications \cite{Tarone1990, Goeman2014, Westfall1997, Pounds2006}. For instance, the many zeroes in microbiome sequence counts cause many observations to be tied. This renders the null distributions of rank test statistics discrete, hampering statistical inference. A good solution is to use random tiebreaking, which greatly alleviates the discreteness of the null distributions. Random tiebreaking is _on average_ equivalent to using midranks. The main drawback of random tiebreaking is that the associated statistical test will have a random outcome.
+
+Our resampling framework allows for an elegant solution. For the observed test statistics, the well established, deterministic midranks \cite{Conover1973} are used, and only in the calculation of the _resample_ test statistics, the ties are broken at random. Hence the only additional source of randomness in the result comes from the random tiebreaking in the calculation of the resample test statistics. The effect of this source of randomness on the result shrinks as the number of resamples $B$ grows (as do all other sources of randomness connected to resampling). Hence this source of randomness can be made arbitrarily small. The resulting testing procedure is thus approximately deterministic for a given dataset, while using a much more continuous null distribution.
+
+### Resampling marginal null
+
+Given the large computational effort invested in the resampling procedure, a valid question is whether it can also be used to estimate on the marginal null distribution function $G_j$ in case no reliable asymptotic or exact alternative is available. This is indeed the case, i.e. the same resampling instances can be used to estimate the marginal as well as the random null.
+
+Resample procedures are often employed when a test statistic does not converge sufficiently quickly to its asymptotic distribution. When the marginal resampling null is not used (e.g. when the researcher is not aware of the slow convergence), our resample method will in general not be robust to the misspecification of the marginal null distribution $g$. The researcher should always check the behaviour of the test statistics under the marginal null, and if needed use the resampling marginal null instead.
+
+\cnp
+
+# Previous attempts at addressing multiplicity correction under dependence
+
+Research into large-scale hypothesis testing under dependence was historically motivated by microarray data. The literature on false discovery rate control and on permutation tests is vast. Here we discuss important results relevant for our work.
+
+## Correlation between test statistics and the false discovery rate
+
+Most research effort into simultaneous inference under dependence has gone to linear regression type cases \cite{Fan2012, Leek2008, Friguet2009, Fan2017}, where a low dimensional approximation of the dependence among test statistics is included in the model. Some methods even require the dependence of test statistics to be known in order to correct for it \cite{Fan2012, Kwong2002, Dudoit2008}. Yet these methods are restricted to linear models, and estimation of correlation structures of non-normal data is difficult, especially in high-dimensional cases.
+
+Many publications focus on estimating the FDP and its variance for a given experiment, rather than controlling the false discovery rate \cite{Schwartzman2011, Fan2012, Efron2010, Gordon2007, Owen2005}.
+
+\textcite{Kim2008} showed how dependence structures in the data cause multiplicity correction methods to fail.
+
+## Permutations
+
+The use of permutation for FDR control has been applied by \textcite{Xie2005, Gao2006, Tusher2001}. The issue faced in analyzing microarrays is that the sample size is so small that the permutation distributions have to be constructed based on pooled permutations from multiple genes \cite{Guo2005, Xie2005}. This creates the risk of incorporating non-null genes, which inflates the permutation null distribution. 
+
+Significance analysis of microarrays (SAM) was a milestone in the development of permutation methods with false discovery rate control \cite{Tusher2001}. Permutations are used to estimate the FDP for different threshold values. An advantage of this approach is that it treats lower and upper tails differently. A downside is that test statistics are pooled in the permutations because of the low sample sizes. The presence of non-null genes may inflate the estimated null distribution, reducing the power \cite{Xie2005}.
+
+\textcite{Xie2005} proposed to split the dataset into significant and non-significant genes based on a summary statistic, and then only using the non-significant ones in the pooled permutation distribution. It has been argued that this leads to an underestimation of the false positives \cite{Gao2006}. \textcite{Guo2005} used the empirical Bayes framework of \textcite{Efron2001} to estimate the fdr, which is then used as weights in different multiplicity correction methods. One of their applications is to use these weights to obtain a better estimate of the collapsed null distribution. This idea very similar to the one presented here, although the authors do not present a thorough statistical justification and do not make the link with correlation of test statistics.
+
+\textcite{Efron2007} also shortly discussed the use of permutations to estimate a conditional Fdr, but only after binning the test statistics into central and tail values. Our work refines this approach by eliminating the need for arbitrary binning and by conditioning on a smooth random null distribution.
+
+<!-- ### Significance analysis of microarrays (SAM) -->
+
+<!-- This technique was used to calculate FDPs for microarray experiments, where the number of replicates is usually low \cite{Tusher2001}. Differences in gene expression between groups are measured, and quantified through a standardized difference in expression d$_1$, ..., d$_p$. These standardized differences are ranked: d$_{(1)}$, ..., d$_{(p)}$. Then the group labels are permuted B times, and each time another series of ranked standardized differences d$^b_{(1)}$, ..., d$^b_{(p)}$  is obtained. The expected relative difference of order $j$ is then defined as -->
+
+<!-- $$d_j^E = \frac{1}{B}\sum_{b=1}^B d^b_{(j)}$$ -->
+
+<!-- Genes with observed d$_{(j)}$ that depart more than a threshold $\Delta$ from the d$_j$-d$_j^E$ trend are called statistically significant. The smallest and the least negative d$_j$s called significant in this way serve as cut-off values. The average number of $d^b_{(j)}$ exceeding these cut-off values was divided by the total number of $d_{(j)}$'s exceeding these cut-off values (the genes called significant) to yield an estimate of the FDP. An advantage of this approach is that it treats lower and upper tails differently. A downside is that genes are in fact mixed in the calculations. The presence of non-null genes may inflate the estimated null distribution, reducing the power \cite{Xie2005}. Even though the differences are standardized, the standardization is a bit ad-hoc, making this procedure error prone. \textcite{Jung2006} also prove it is unable to deal with strong dependence. -->
+
+<!-- \textcite{Jiao2008} try to improve on this, but maintain the binary split. The idea of using the outcome of the test in an iterative loop to improve the null is thus definitely not new.  -->
+
+## Estimating the collapsed normal null
+
+The empirical Bayes procedure by \textcite{Efron2001} is able to negotiate both shifted and scaled distributions, maintaining the normality assumption. It does by assuming that the random null follows $N(\mu, \sigma^2)$ whereby both parameters are estimated based on the central 50% of the distribution. Using split-normals, it can even address the asymmetry of the tails. \textcite{Efron2007} recommends this approach as it is able to negotiate correlation effects.
+
+\cnp
+
+# Simulation study
+
+## Oracle estimation
+
+In order to compare the impact of different sources of variability of the estimator $\hat{h}$, an _oracle_ estimator was included. Oracle methods rely on information that is known in a simulation but unknown when analyzing a real dataset, e.g. which null hypotheses are true.
+
+The oracle method estimates $h$ directly on the vector of z-statistics from a true null hypothesis ($\mb{Z}_0$) through maximum likelihood. This corresponds with using "known weights" 0 and 1 for false and true null hypothesis respectively (rather then $\widehat{fdr}(z)$) in the weighted likelihood estimator. $\pi_0$ and $fdr(z)$ will still be estimated, but the iterative procedure is not needed anymore, as the estimation of $\pi_0$ only requires $\hat{H}$
+
+## Permutation
+
+```{r setParamsPerm}
+p = 1000; n = 50; p0 = 0.75
+FC = 0.6 #The fold change
+sigLevel = 0.1 #The significance level
+x = c(rep(FALSE,n/2), rep(TRUE,n/2)) #Grouping variable
+idDA = c(rep(FALSE, p*p0), rep(TRUE, p*(1-p0))) #non-null features
+Sds = c(0, 0.375, 0.75) #Correlation strength
+reps = 100L #Number of Monte-Carlo instances
+B = 5e2L #Number of resamples
+```
+
+Multivariate normal data with $n=`r n`$ samples and $p=`r p`$ features with different correlations between the features are generated. The correlation matrix is build by setting the diagonal elements equal to 1, and setting the off-diagonal elements to either 0, 0.375 or 0.75. The samples were split evenly into two groups, for 25\% of the features the mean was set to $`r FC`$ in one of the groups, in all other cases the mean was 0. The standard deviation was set to 1 for all features. $`r reps`$ Monte-Carlo instances were generated. Wilcoxon rank sum tests for association with the grouping factor were performed for every feature. Following multiple testing correction methods were applied:
+
+ - Benjamini-Hochberg (BH) on the p-values
+ - Empirical Bayes as explained in \eqref{supeq:tailFdr} with following estimates for the null distribution $h$:
+    * Standard normal (theorFdr)
+    * Empirical null distribution (empFdr) \cite{Efron2001}
+    * Asymmetric empirical null distribution (empAsymFdr) \cite{Efron2001}
+    * Resample (permutation) null distribution as explained in Section \ref{supsec:resampNull}, with $`r B`$ permutation (BMAwFdr)
+    * Oracle null distribution
+ 
+ In all cases except the first tail area false discovery rates (Fdr) are calculated. Features were considered significant of they had an estimated Fdr or adjusted p-value <$`r sigLevel`$
+
+```{r corZvaluesPerf, fig.cap  = "False discovery proportion (top) and sensitivity (bottom) of multiplicity correction methods on multivariate normal data with increasing correlation strength (top panels).  In the bottom panels, black diamonds indicate estimated FDR, blue diamonds the estimated mFDR.\\label{supfig:PilotPerm}"}
+fileZres = "simResults/zRes.RData"
+if(!file.exists(fileZres)){
+zRes = mclapply(mc.cores = 4, integer(reps), function(i){
+testRes = lapply(Sds, function(Sd){
+  mat = makeZnorm(n = n, p = p, p0 = p0, FC = FC, makeSigma(p, Sd))
+  bmaw = rransi(Y = mat, x = x, test = "wilcox.test", B = B)
+  pVal = 2*sapply(bmaw$cdfValObs, function(x){min(x, 1-x)})
+  zVal = qnorm(bmaw$cdfValObs)
+  locfdrRes = getLocFdr(zVal)
+  locfdrResAsym = getLocFdr(zVal, nulltype = 3)
+  theorObj = do.call(what = getTheorFdr, args = bmaw)
+  oracleObj = getOracleFdr(bmaw, !idDA)
+  list(BMAw = bmaw, theorObj = theorObj, pvals = pVal,
+       locfdrRes = locfdrRes, locfdrResAsym = locfdrResAsym, oracleObj = oracleObj)
+  })
+names(testRes) = Sds
+lapply(testRes, function(x){sapply(makeList(x, samr = FALSE, norm = FALSE, bma = FALSE, oracle = TRUE), evaluatePerformance,
+                    method = "none", sigLevel = sigLevel, numSignif = TRUE,
+                    idDA = idDA)
+})
+})
+names(zRes) = seq_len(reps)
+#zRes = zRes[!sapply(zRes, function(x){inherits(x, "try-error") | is.null(x)})]
+save(zRes, file = fileZres)
+} else load(fileZres)
+
+moltZ = melt(zRes)
+names(moltZ) = c("Criterion","Multiplicity","value","CorrelationStrength","rep")
+moltZ = droplevels(moltZ[moltZ$Multiplicity %in% levelsPlot,])
+moltZ$Multiplicity = factor(moltZ$Multiplicity, levels = levelsPlot, labels = labelsPlot, ordered = TRUE)
+# plot(moltZ[moltZ$Criterion == "pos", ]$value, moltZ[moltZ$Criterion == "FDP", ]$value,
+#      log = "y", col = factor(moltZ[moltZ$Criterion == "FDP", ]$CorrelationStrength))
+moltZ$Criterion = factor(moltZ$Criterion, levels = c("FDP", "Sens", "pos"), labels = c("FDP", "Sensitivity", "pos"), ordered = TRUE)
+weights = aggregate(data = moltZ[moltZ$Criterion == "pos", ], value ~ Multiplicity + CorrelationStrength, FUN = function(x){if(all(x==0)) rep(NA,length(x)) else x/sum(x)}) #If no discoveries, no weight
+moltZ2 = droplevels(moltZ[moltZ$Criterion %in% c("FDP", "Sensitivity"),])
+
+dfAveragesW = aggregate(data = moltZ2, value ~ Criterion + Multiplicity + CorrelationStrength, FUN = mean) #Diamonds for averages
+dfAveragesWw = data.frame(t(sapply(seq_len(nrow(weights)), function(i){
+  c(value = sum(moltZ2[moltZ2$Criterion == "FDP" & as.character(moltZ2$Multiplicity) == as.character(weights$Multiplicity)[i] & 
+          moltZ2$CorrelationStrength == weights$CorrelationStrength[i], ]$value * weights$value[i,]),
+  Multiplicity = as.character(weights$Multiplicity)[i], CorrelationStrength = as.character(weights$CorrelationStrength)[i], Criterion = "FDP")
+})))
+dfAveragesWw$value = as.numeric(as.character(dfAveragesWw$value))
+ggplot(data = moltZ2, aes(x = Multiplicity, y = value, col = Multiplicity)) +
+  geom_boxplot() +
+  facet_grid(cols = vars(CorrelationStrength), rows = vars(Criterion)) +
+  #scale_y_continuous(limits = c(0,1)) + 
+  geom_hline(yintercept = sigLevel, col = "darkgreen", linetype = "dashed") + 
+  geom_point(data = dfAveragesW, shape = 23, col = FDRcol) +
+  geom_point(data = dfAveragesWw, shape = 23, col = mFDRcol) +
+  scale_colour_brewer(palette = "Paired", name = "Multiplicity correction") +
+  theme_bw() + xlab("") + ylab("") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+ggsave(filename = "Manuscript/Figures/pilotSim.pdf")
+```
+
+From Figure \ref{supfig:PilotPerm} it is clear that the variability of the FDP and the sensitivity increase with increasing correlation between the features when Benjamini-Hochberg correction and the standard normal null are used. For these two methods also the FDR and mFDR diverge for increasing variability, with the mFDR exceeding the nominal level of $`r sigLevel`$. The methods based on the empirical null control the FDR and mFDR, but suffer from low sensitivity. For the methods based on the resampling null and oracle null, the FDR and mFDR are almost identical and equal to the nominal level, with very little variability in the FDP. The sensitivity of both methods increases with the correlation between the features, although the oracle null always has a higher sensitivity than the resample null, and in absence of correlation the standard normal null leads to a higher sensitivity than the resample null. This suggests that the imperfect estimation of the random null in absence of correlation is to blame for a power loss. The variability of the sensitivity does not increase with correlation for the resample null and oracle null methods.
+
+## Bootstrap
+
+```{r bootstrapParams}
+FCboot = 0.3
+```
+
+The setup of the simulation is similar to the one for testing the permutation algorithm. The only differences is that there are no groups, the mean is 0 for 75\% of the features and $`r FC`$ for the other 25\%. A one-sample t-test assuming equal variances is used to test the null hypothesis that the mean equals 0 for every feature. For the resample method, $`r B`$ bootstraps are performed.
+
+```{r rransiBoot, fig.cap = "\\label{supfig:bootstrap} Sensitivity (top) and false discovery proportion (bottom) of multiplicity correction methods on multivariate normal data with increasing correlation strength (top panels) for the one-sample t-test. In the bottom panels, black diamonds indicate estimated FDR, blue diamonds the estimated mFDR."}
+testFunction = function(y, x){t.test(y, mu = 0, var.equal = TRUE)$statistic}
+if(!file.exists("simResults/zResBoot.RData")){
+zResBoot = mclapply(mc.cores = 4, integer(reps), function(i){
+testRes = lapply(Sds, function(Sd){
+  mat = makeZnorm(n = n, p = p, p0 = p0, FC = FCboot, makeSigma(p, Sd), oneGroup = TRUE)
+  bmaw = rransi(Y = mat, test = "testFunction", B = B, densFun = "dt", distFun = "pt", quantileFun = "qt", testPargs = list(df = n-1), center = TRUE)
+  pVal = 2*sapply(bmaw$cdfValObs, function(x){min(x, 1-x)})
+  zVal = qnorm(bmaw$cdfValObs)
+  locfdrRes = getLocFdr(zVal)
+  locfdrResAsym = getLocFdr(zVal, nulltype = 3)
+  theorObj = do.call(what = getTheorFdr, args = bmaw)
+  oracleObj = getOracleFdr(bmaw, !idDA)
+  list(BMAw = bmaw, theorObj = theorObj, pvals = pVal,
+       locfdrRes = locfdrRes, locfdrResAsym = locfdrResAsym, oracleObj = oracleObj)
+})
+names(testRes)  = Sds
+lapply(testRes, function(x){sapply(makeList(x, samr = FALSE, norm = FALSE, bma = FALSE, oracle = TRUE), evaluatePerformance, method = "none", sigLevel = sigLevel, numSignif = TRUE, idDA = idDA)
+})
+})
+names(zResBoot) = seq_len(reps)
+save(zResBoot, file = "simResults/zResBoot.RData")
+} else load("simResults/zResBoot.RData")
+
+moltZboot = melt(zResBoot)
+names(moltZboot) = c("Criterion","Multiplicity","value","CorrelationStrength","rep")
+moltZboot = droplevels(moltZboot[moltZboot$Multiplicity %in% levelsPlot,])
+moltZboot$Multiplicity = factor(moltZboot$Multiplicity, levels = levelsPlot, labels = labelsPlot, ordered = TRUE)
+# plot(moltZ[moltZ$Criterion == "pos", ]$value, moltZ[moltZ$Criterion == "FDP", ]$value, 
+#      log = "y", col = factor(moltZ[moltZ$Criterion == "FDP", ]$CorrelationStrength))
+weightsBoot = aggregate(data = moltZboot[moltZboot$Criterion == "pos", ], value ~ Multiplicity + CorrelationStrength, FUN = function(x){if(all(x==0)) rep(NA,length(x)) else x/sum(x)}) #If no discoveries, no weight
+moltZboot2 = droplevels(moltZboot[moltZboot$Criterion %in% c("FDP", "Sens"),])
+
+dfAveragesW = aggregate(data = moltZboot2, value ~ Criterion + Multiplicity + CorrelationStrength, FUN = mean) #Diamonds for averages
+dfAveragesWw = data.frame(t(sapply(seq_len(nrow(weightsBoot)), function(i){
+  c(value = sum(moltZboot2[moltZboot2$Criterion == "FDP" & as.character(moltZboot2$Multiplicity) == as.character(weightsBoot$Multiplicity)[i] & 
+          moltZboot2$CorrelationStrength == weightsBoot$CorrelationStrength[i], ]$value * weightsBoot$value[i,]),
+  Multiplicity = as.character(weightsBoot$Multiplicity)[i], CorrelationStrength = as.character(weightsBoot$CorrelationStrength)[i], Criterion = "FDP")
+})))
+dfAveragesWw$value = as.numeric(as.character(dfAveragesWw$value))
+ggplot(data = moltZboot2, aes(x = Multiplicity, y = value, col = Multiplicity)) +
+  geom_boxplot() +
+  facet_grid(cols = vars(CorrelationStrength), rows =vars(Criterion)) +
+  #scale_y_continuous(limits = c(0,1)) + 
+  geom_hline(yintercept = sigLevel, col = "darkgreen", linetype = "dashed") + 
+  geom_point(data = dfAveragesW, shape = 23, col = FDRcol)+
+  geom_point(data = dfAveragesWw, shape = 23, col = mFDRcol) +
+  theme_bw() + xlab("") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())+  scale_colour_brewer(palette = "Paired")
+```
+
+The power gain achieved by accounting for the correlation has been long known \cite{Westfall1993}, and has been mentioned with respect to permutations too \cite{Korn2004}.
+
+The results for the bootstrap are very similar to those for the permutations, as evident from Figure \ref{supfig:bootstrap}. The only difference is the tendency of the resample normal null to yield a slightly liberal method. This may be because of slower convergence in finite samples of the bootstrap as compared to permutations, as the bootstrap is only approximately valid while permutations are exact \cite{Davison1997, Higgins2004}.
+
+\cnp
+
+# Case study: inferring differential absolute abundance in microbiome data
+
+In microbiome studies, the bacterial composition of a sample is determined by purifying bacterial DNA, amplifying a marker gene and sequencing this library of marker genes. The marker genes uniquely identify bacterial species. In what follows we refer to these species as taxa. Because of all the technical manipulations, the eventual number of sequence counts is unrelated to the initial number of cells or biomass. Hence inference can only be done on the proportions or *relative abundances* of the taxa \cite{Stackebrandt1994}. However, this poses problems of compositionality: an increases in relative abundances of one taxon inevitably leads to the decrease of others \cite{Gloor2017, Tsilimigras2016}. Having measures of absolute total cell counts per sample would eliminate this problem. Moreover, researchers are also interested in detecting changes in *absolute abundances* of certain bacteria.
+
+Flow cytometry provides an easy, high throughput way to count cell numbers in fixed volumes of microbiological samples. Even though most flow cytometers have several measurement channels, and can thus can yield a more complex signal, we focus purely on the number of cells counted per volume or measurement time.
+
+The information from sequencing and flow cytometry has been combined before to do inference on taxon-wise absolute cell concentrations \cite{Prest2014, Vandeputte2017, Props2016, Rivett2018}. Tests for differences in cell concentration for every taxon between two or more sample groups are then said to look for "differential _absolute_ abundance", in analogy to the classical "differential (relative) abundance" \cite{McMurdie2014}.
+
+## Data structure
+
+The sequence count data is designated by a $n\times p$ count matrix **Y** The total number of reads per sample $i$, $s_i = \sum_{j=1}^px_{ij}$, with _j_ a taxon index, is called the _library size_. The relative abundance of taxon _j_ is given by $r_j = \frac{\sum_{i=1}^nx_{ij}}{\sum_{j=1}^p\sum_{i=1}^nx_{ij}}$.
+
+The flow cytometry readout yields a vector **D** of length n with elements $d_i$ representing the number of cells counted in sample _i_. Additionally, a vector **v** of length n contains the volumes, total weights or biomasses that were measured. These values $v_i$ were chosen by the researcher or depend on the machine, and are thus considered fixed. This quantity also corrects for dilution prior to measurement. In what follows we will work with the normalized concentration vector **C** = **D**/**v**, which need not be integer.
+
+The quantity of interest is then $\frac{x_{ij}c_i}{s_i}$, which is an estimate of the cell concentration of taxon $j$ in sample $i$. Here the problem of the problem of testing the association with a grouping factor **x** is investigated.
+
+The test statistics of the different taxa are correlated, as they all rely on the same absolute flow cytometry count measure **C**. Mathematically speaking, all tests rely on the estimate $\hat{\mathbf{C}}$; and share the same error. If by chance, the measured total cell counts are slightly larger in one group than another, even though their population means are the same, then all taxon-wise absolute abundance estimates $\frac{x_{ij}c_i}{s_i}$ will vary in the same way. Additionally, biological correlations between taxa (e.g. due to competition or cross-feeding) can also cause the columns of **Y** to be correlated \cite{Friedman2012, Kurtz2015, Faust2012}.
+
+## Datasets
+
+### Props 2016
+
+This dataset contains microbiomes and flow cytometry measurements from an engineered cooling water system of a nuclear test plant \cite{Props2016}. Reactor cycle and reactor phase are two cofactors for which one might want to test for differential abundance.
+
+### Props 2018
+
+
+### Vandeputte 2017
+
+Microbiomes and flow cytometry measurements from a study on Crohn's disease, with data from the Flemish gut flora project \cite{Vandeputte2017}. Health status (healthy/Crohn's disease) is the variable of interest.
+
+### Rivett 2018
+
+A controlled growth experiment of microbiomes originating from beech tree water holes \cite{Rivett2018}. There is no obvious grouping variable available in this study.
+
+### Data exploration
+
+Figures \ref{supfig:taxProp} and \ref{supfig:zeroFrac} give an impression of respectively the population evenness and sparsity of the datasets under study.  It is clear that the Props2016 and Props2018 datasets are strongly skewed to rare taxa, and that the Vandeputte2017 dataset is least sparse. From Figure \ref{supfig:flowCyto} we see that the Props2016 and especially the Vandeputte2017 datasets have much higher flow cytometry counts than the other datasets.
+
+```{r taxonProp, fig.cap = "Histograms of log10 observed taxon proportions per dataset.\\label{supfig:taxProp}."}
+par(mfrow = c(2,2))
+foo = lapply(phyNames, function(phy){
+  hist(log10(taxa_sums(phyList[[phy]])/sum(taxa_sums(phyList[[phy]]))), main = phy, xlab = "log10 abundances", xlim = c(-8,0))
+})
+par(mfrow = c(1,1))
+```
+
+```{r zeroFrac, fig.cap = "Histograms of zero frequencies per taxon for every dataset. \\label{supfig:zeroFrac}."}
+par(mfrow = c(2,2))
+foo = mapply(phyNames, concVars, FUN = function(phy, conc){
+  hist(get_variable(phyList[[phy]], conc), main = phy, xlab = "Flow cytometry counts")
+})
+par(mfrow = c(1,1))
+```
+
+```{r flowCytometry, fig.cap = "Histograms of flow cytometry counts for every dataset\\label{supfig:flowCyto}."}
+par(mfrow = c(2,2))
+foo = lapply(phyNames, function(phy){
+  hist(colMeans(as(otu_table(phyList[[phy]]), "matrix")==0), main = phy, xlab = "Zero frequencies per taxon")
+})
+par(mfrow = c(1,1))
+```
+
+## Applied simulation study
+
+Data are generated in following ways based on the real datasets. Each simulation paradigm must strike a balance between the making of assumptions on the data and control over the ground truth. We use the same four paradigms previously applied in \textcite{Hawinkel2017}. In all cases, a maximum of the 1,000 most abundant taxa was retained for the simulations.
+
+### Simulation setup
+
+#### Parametric simulation
+
+In the parametric simulations, the sequence count data are assumed to follow the negative binomial distribution. The corresponding parameters are estimated using maximum likelihood. For data generation, estimates of library sizes and abundance-dispersion pairs are resampled from these pools of estimated values. No distributional assumption is made on the flow cytometry counts, they are just resampled from the pool of observed values for every dataset. Fold changes introduced in the sequence count data are [1,5,10]. Following 4 correlation scenarios are used:
+ 
+ * "None": No correlation between taxa, test for differential relative abundance
+ * "Cor": With correlation between taxa, test for differential relative abundance
+ * "FC": No correlation between taxa, test for differential absolute abundance
+ * "FC + Cor": With correlation between taxa, test for differential absolute abundance
+ 
+ The scenarios whereby a flow cytometry count vector is sampled for every taxon separately are not realistic, but just serve to introduce realistic levels of noise without introducing correlation between test statistics. Correlation between features was estimated using _SpiecEasi_ \cite{Kurtz2015}. The differential absolute abundance (DAA) is only introduced in the sequence count part, the flow cytometry counts are sampled from the same pool for both groups.
+  
+```{r parSimSetup}
+#Data generation
+Nsim = 1e2L
+p = 1000L
+ns = c(20, 50)
+cors = c("None", "Cor", "FC", "Cor+FC")
+foldChanges = c(1,5,10)
+B = 1e3L
+templates = c("Props2016", "Props2018" , "Vandeputte2017", "Rivett2018")
+p0 = c(0.9, 0.75, 0.5)
+intrStrat = c("seq")
+tests = c("wilcox.test" = "wilcox.test","t.test" = "t.test")
+if(!file.exists("simStudy/resultsParamSim.RData")){
+  genStrings = expand.grid("rep" = seq_len(Nsim), "Cor" = cors, "fc" = foldChanges, 
+                           "Template" = templates, "p0" = p0, "samSize" = ns, "intrStrat" = intrStrat)
+  genStrings = genStrings[!(genStrings$fc==1 & genStrings$p0!= p0[1]),]
+  genStrings = genStrings[!(!grepl("FC", genStrings$Cor) & as.character(genStrings$intrStrat)== "both"),]
+  #Computationally intensive!
+  resultsParamSim0 = lapply(seq_len(nrow(genStrings)), function(i){
+  #Generate data
+  seqMat = genWrapper(n = genStrings[i, "samSize"], Template = genStrings[i, "Template"],
+                    estparamList = estparamList, p = p, intrStrat = genStrings[i, "intrStrat"],
+                    corStrat = genStrings[i, "Cor"], p0 = genStrings[i, "p0"],
+                    rep = genStrings[i, "rep"], foldChange = genStrings[i, "fc"])
+  #Analyze data
+  resList = lapply(tests, evalFun, seqMat = seqMat, B = B)
+  return(resList)
+})
+resultsParamSim = melt(resultsParamSim0)
+names(resultsParamSim) = c("Criterion","Multiplicity","value","Test", "params")
+resultsParamSim = cbind(resultsParamSim, matrix(unlist(strsplit(resultsParamSim$params, "_")), ncol = 7, byrow = TRUE, dimnames = list(NULL, c("replicate","Correlation", "FoldChange", "Template", "p0", "samSize", "FoldChangeType"))))
+resultsParamSim$samSize = as.integer(as.character(resultsParamSim$samSize))
+resultsParamSim$FoldChange = as.integer(as.character(resultsParamSim$FoldChange))
+resultsParamSim$params = NULL
+resultsParamSim$Correlation = factor(resultsParamSim$Correlation, levels = c("None","Cor","FC","Cor+FC"), ordered = TRUE)
+resultsParamSim$Criterion = factor(resultsParamSim$Criterion, labels = c("FDP", "Sensitivity", "pos"), 
+                                 levels = c("FDP", "Sens", "pos"), ordered = TRUE)
+save(resultsParamSim, file = "simStudy/resultsParamSim.RData")
+} else {load("simStudy/resultsParamSim.RData")}
+```
+ 
+#### Non-parametric simulation
+
+The non-parametric simulation machinery of _SimSeq_ allows to resample sequence counts from real datasets to generate realistic data, and yet introduce differential abundance \cite{Benidt2015}. Its main drawback is that it breaks correlation between DA and non DA taxa. _SimSeq_ proceeds as follows
+
+1) Test for differential relative abundance (DRA) using Wilcoxon rank sum test and calculate the fdr using the _fdrtool_ package \cite{Strimmer2008}.
+2) Declare all taxa with an lfdr above 0.1 non differentially abundant (NDA), and the others differentially abundant DA.
+3) Sample NDA counts from the most abundant group.
+4) Sample DA counts with a weight of 1-lfdr from the DA group, sampling counts for each group separately.
+5) Sample flow cytometry counts at random from the pool of observed counts, i.e. without group differences.
+
+```{r simseq}
+#Perform tests, and get weights
+if(!file.exists("simResults/simSeqRes.RData")){
+simSeqRes = lapply(tests, function(test){
+  lapply(phyNames, function(name){
+    BMA = testDAA.phylo(phyList[[name]], groupVars[[name]], concVars[[name]], test = test, B = B, weightStrat = "LH", zVals = obsTestList[[name]][[test]])
+  pvals = 2*pnorm(-abs(BMA$zValObs))
+  locfdrRes = if(name == "Props2018" & test=="wilcox.test") list(Fdr = 1, fdr = 1) else getLocFdr(BMA) #no solution for Props2018
+  theorObj = do.call(what = getTheorFdr, args = BMA)
+  makeList(list(BMA = BMA, BMAw = obsTestList[[name]][[test]], theorObj = theorObj, pvals = pvals, locfdrRes = locfdrRes))
+  })
+})
+lfdrWeights = lapply(tests, function(test){
+  lapply(phyNames, function(name){
+    getLFDRs(simSeqRes, test = test, template = name)
+    })
+  })
+save(simSeqRes, lfdrWeights, file = "simResults/simSeqRes.RData")
+} else {load("simResults/simSeqRes.RData")}
+```
+
+```{r nonParSimSetup}
+#Data generation
+Nsim = 1e2L; p = 1000L
+ns = c(20, 28)
+templates = c("Props2016", "Props2018" , "Vandeputte2017")
+p0 = c(0.9, 0.75, 0.5)
+corsSimSeq = c("Cor", "Cor+FC")
+if(!file.exists("simStudy/resultsSimSeq.RData")){
+genStringsSimSeq = expand.grid("replicate" = seq_len(Nsim), "Template" = templates, "p0" = p0, "samSize" = ns, "test" = tests, "Cor" = corsSimSeq)
+genStringsSimSeq = genStringsSimSeq[!(genStringsSimSeq$Template == "Props2016" & genStringsSimSeq$samSize > 20),]
+genStringsSimSeq = genStringsSimSeq[!(genStringsSimSeq$Template == "Vandeputte2017" & genStringsSimSeq$samSize > 28),]
+resultsSimSeq0 = lapply(seq_len(nrow(genStringsSimSeq)), function(i){
+  #Generate data
+  seqMatSimSeq = genWrapperSimSeq(samSize = genStringsSimSeq[i,"samSize"], p = p,  concName = concVars[[genStringsSimSeq[i,"Template"]]], Cor = genStringsSimSeq[i,"Cor"],
+lfdr = lfdrWeights[[genStringsSimSeq[i,"test"]]][[genStringsSimSeq[i,"Template"]]],
+physeq = phyList[[genStringsSimSeq[i,"Template"]]], groupName = groupVars[[genStringsSimSeq[i,"Template"]]], p0 = as.double(genStringsSimSeq[i,"p0"]))
+  #Analyze data
+  resListSimSeq = lapply(tests, evalFun, seqMat = seqMatSimSeq, B = B)
+  return(resListSimSeq)
+})
+resultsSimSeq = melt(resultsSimSeq0)
+names(resultsSimSeq) = c("Criterion","Multiplicity","value", "params")
+resultsSimSeq = cbind(resultsSimSeq, genStringsSimSeq)
+resultsSimSeq$Criterion = factor(resultsSimSeq$Criterion, labels = c("FDP", "Sensitivity", "pos"), 
+                                 levels = c("FDP", "Sens", "pos"), ordered = TRUE)
+resultsSimSeq$samSize = as.integer(as.character(resultsSimSeq$samSize))
+save(resultsSimSeq, file = "simStudy/resultsSimSeq.RData")
+} else {load("simStudy/resultsSimSeq.RData")}
+```
+ 
+#### Mock groups
+
+This paradigm consists of permuting the grouping factor of existing data to create mock groups, and then testing for differential absolute abundance with respect to this grouping factor. This technique is used to evaluate the type I error rates.
+
+```{r mockGroupsSim}
+Nsim = 1e2L; p = 1000L
+ns = c(20, 50)
+templates = c("Props2016", "Props2018", "Vandeputte2017", "Rivett2018")
+corsMock = c("Cor","Cor+FC")
+if(!file.exists("simStudy/resultsMock.RData")){
+genStringsMock = expand.grid("replicate" = seq_len(Nsim), "Template" = templates, "samSize" = ns, "Cor" = corsMock)
+genStringsMock = genStringsMock[!(genStringsMock$Template=="Props2016" & genStringsMock$samSize==100),]
+resultsMock0 = mclapply(mc.cores = nCores, seq_len(nrow(genStringsMock)), function(i){
+  #Generate data
+  seqMatMock = genWrapperMock(n = genStringsMock[i,"samSize"], p = p, Template = phyList[[genStringsMock[i,"Template"]]], rep = genStringsMock[i,"rep"], FCname = concVars[[genStringsMock[i,"Template"]]], Cor = genStringsMock[i,"Cor"])
+  #Analyze data
+  resListMock = lapply(tests, evalFun, seqMat = seqMatMock, B = B)
+  return(resListMock)
+})
+resultsMock = melt(resultsMock0)
+names(resultsMock) = c("Criterion","Multiplicity","value","Test", "params")
+resultsMock = cbind(resultsMock, genStringsMock)
+                    #matrix(unlist(strsplit(resultsMock$params, "_")), ncol = 4, byrow = TRUE, dimnames = list(NULL, c("replicate","Template","samSize", "Cor"))))
+resultsMock$samSize = as.integer(as.character(resultsMock$samSize))
+save(resultsMock, file = "simStudy/resultsMock.RData")
+} else {load("simStudy/resultsMock.RData")}
+```
+
+<!-- ### Evaluation-verification -->
+
+<!-- Repeatedly split a dataset into a small evaluation and larger verification dataset. Test for differential absolute abundance in both groups, and evaluate performance of the method on the evaluation set, considering the results on the verification dataset as the truth. -->
+
+<!-- See \cite{Hawinkel2017}. -->
+
+<!-- ```{r evGroupsSim, eval = FALSE} -->
+<!-- Nsim = 1e3L; p = 1000L -->
+<!-- ns = c(10L, 18L) -->
+<!-- templates = c("Props2016", "Props2018", "Vandeputte2017") -->
+<!-- corsEV = c("Cor","Cor+FC") -->
+<!-- genStringsEV = expand.grid("rep" = seq_len(Nsim), "Template" = templates, "samSize" = ns, "Cor" = corsEV) -->
+<!-- genStringsEV = genStringsEV[!(genStringsEV$Template=="Props2016" & genStringsEV$samSize %in% c(23)),] -->
+<!-- genStringsEV = genStringsEV[!(genStringsEV$Template=="Vandeputte2017" & genStringsEV$samSize %in% c(18,23)),] -->
+<!-- simNamesEV = colnames(genStringsEV) -->
+<!-- save(simNamesEV, concVars, groupVars, p, phyList, file = "simStudy/simNamesEV.RData") -->
+<!-- write.csv(genStringsEV, quote = FALSE, file = "simStudy/csvFiles/simsEV.csv", row.names=FALSE) -->
+<!-- #write.csv(genStringsEV[sample(seq_len(nrow(genStringsEV)), 30),], quote = FALSE, file = "simStudy/csvFiles/simsEVTest.csv", row.names=FALSE) -->
+<!-- genStringsEVPasted = gsub("_ ", "_", trimws(apply(genStringsEV, 1, paste, collapse = "_"))) -->
+<!-- genStringsEVLeft = genStringsEV[!genStringsEVPasted %in% gsub("0.9", "0.90", gsub("0.5", "0.50", gsub("res_","",gsub(".RData", "", presFilesEV)))),] -->
+<!-- write.csv(genStringsEVLeft, quote = FALSE, file = paste0("simStudy/csvFiles/simsEVleft.csv"), row.names=FALSE) -->
+<!-- ``` -->
+
+<!-- ```{r EVRes, eval = FALSE} -->
+<!-- if(!file.exists("simStudy/resultsEV.RData")){ -->
+<!-- presFilesEV = list.files("simStudy/resultsEV/") -->
+<!-- resultsEV0 = lapply(presFilesEV, function(x){load(file.path("simStudy//resultsEV/",x)); return(resListEval)}) -->
+<!-- names(resultsEV0)  = gsub("res_","", gsub(".RData", "", presFilesEV)) -->
+<!-- resultsEV = melt(resultsEV0) -->
+<!-- names(resultsEV) = c("Criterion", "Evaluation", "value", "Verification", "Test", "params") -->
+<!-- resultsEV = cbind(resultsEV, matrix(unlist(strsplit(resultsEV$params, "_")), ncol = 4, byrow = TRUE, dimnames = list(NULL, c("replicate","Template","samSize", "Cor")))) -->
+<!-- resultsEV$samSize = as.integer(as.character(resultsEV$samSize)) -->
+<!-- resultsEV$Verification = factor(resultsEV$Verification, levels = levels(resultsEV$Evaluation), ordered = TRUE) -->
+<!-- save(resultsEV, file = "simStudy/resultsEV.RData") -->
+<!-- } else {load("simStudy/resultsEV.RData")} -->
+<!-- ``` -->
+
+<!-- ```{r EVPlot, eval = FALSE} -->
+<!-- resPlot(resultsEV, c("Test","Template","Criterion","Cor"), c("wilcox.test", "Props2016", "FDP", "Cor+FC"), x = "Evaluation", colour = "Evaluation", rows = "samSize", cols = "Verification") -->
+<!-- #Looking at self-consistency, SAM and one-sided emprical fdr are not self-consistent for the FDP -->
+
+<!-- resPlot(resultsEV, c("Test","Template","Criterion","Cor"), c("wilcox.test", "Props2016", "Sens", "Cor+FC"), x = "Evaluation", colour = "Evaluation", rows = "samSize", cols = "Verification") -->
+<!-- #This analysis does not really facilitate a real conclusions, most methods are self consistent, but there are large differences between the methods. -->
+<!-- ``` -->
+
+### Results
+\label{supsec:results}
+
+#### H0
+
+```{r simParamFoldChangeTestH0, fig.cap = "Estimated under H0 in parametric simulation using Wilcoxon rank sum test for different sample sizes (x-axis), based on different datasets (top panels) and for different levels of correlation between features (right panels).\\label{supfig:H0Wilcox}"}
+levelsPlot2 = c(levelsPlot, "sam")
+labelsPlot2 = c(labelsPlot, "sam")
+aggDataFCpar = getFDR(df = resultsParamSim[resultsParamSim$Criterion == "FDP" & resultsParamSim$p0 == 0.9 & resultsParamSim$Test == "wilcox.test" & resultsParamSim$FoldChange == 1 & resultsParamSim$FoldChangeType == "seq",], vars = c("Criterion", "Multiplicity", "Correlation", "Template", "samSize"))
+ggplot(data = filterLevelsPlot(aggDataFCpar, levels = levelsPlot2, labels = labelsPlot2), mapping = aes(x = samSize, y = value, colour = Multiplicity, group = Multiplicity)) +
+  geom_path(position = position_jitterdodge(jitter.height = 0.05, jitter.width = 0), size = 0.5) +
+  facet_grid(rows = vars(Correlation), cols = vars(Template)) +
+  scale_x_continuous(breaks = unique(resultsParamSim$samSize), name ="Sample size") +
+  scale_y_continuous(name = "FDP") +
+  geom_hline(yintercept = sigLevel, linetype = "dashed") +
+  scale_colour_brewer(palette = "Paired") +
+  #scale_colour_manual(values = brewer.pal(7, "Paired"))+
+  theme_bw()
+```
+
+```{r simParamFoldChangeTestH0b, fig.cap = "Estimated under H0 in parametric simulation using two sample t-test for different sample sizes (x-axis), based on different datasets (top panels) and for different levels of correlation between features (right panels).\\label{supfig:H0T}"}
+aggDataFCparT = getFDR(df = resultsParamSim[resultsParamSim$Criterion == "FDP" & resultsParamSim$p0 == 0.9 & resultsParamSim$Test == "t.test" & resultsParamSim$FoldChange == 1 & resultsParamSim$FoldChangeType == "seq",], vars = c("Criterion", "Multiplicity", "Correlation", "Template", "samSize"))
+ggplot(data = filterLevelsPlot(aggDataFCparT, levels = levelsPlot2, labels = labelsPlot2), mapping = aes(x = samSize, y = value, colour = Multiplicity, group = Multiplicity)) +
+  geom_path(position = position_jitterdodge(jitter.height = 0.05, jitter.width = 0), size = 0.5) +
+  facet_grid(rows = vars(Correlation), cols = vars(Template)) +
+  scale_x_continuous(breaks = unique(resultsParamSim$samSize), name ="Sample size") +
+  scale_y_continuous(name = "FDP") +
+  geom_hline(yintercept = sigLevel, linetype = "dashed") +
+  scale_colour_brewer(palette = "Paired") +
+  #scale_colour_manual(values = brewer.pal(7, "Paired"))+
+  theme_bw()
+``` 
+
+```{r mockGroupPlot, fig.cap = "Estimated FDR with mock groups. Top panels show template datasets, right panels the test applied. \\label{supfig:H0mock}"}
+aggDataFC = getFDR(df = resultsMock[resultsMock$Criterion == "FDP" & resultsMock$Cor == "Cor+FC",], vars = c("Criterion", "Multiplicity", "Test", "Template", "samSize"))
+ggplot(data = filterLevelsPlot(aggDataFC, levels = levelsPlot2, labels = labelsPlot2), mapping = aes(x = samSize, y = value, colour = Multiplicity, group = Multiplicity)) +
+  geom_path(position = position_jitterdodge(jitter.height = 0.05, jitter.width = 0), size = 0.5) +
+  facet_grid(rows = vars(Test), cols = vars(Template)) +
+  scale_x_continuous(breaks = unique(resultsMock$samSize), name ="Sample size") +
+  scale_y_continuous(name = "Estimated FDR") +
+  geom_hline(yintercept = sigLevel, linetype = "dashed") +
+  scale_colour_brewer(palette = "Paired") +
+  theme_bw()
+```
+
+The results of the simulation under H0 ($\pi_0$ = 1) are shown in Figures \ref{supfig:H0Wilcox}-\ref{supfig:H0mock}. Notice that in this scenario and as such it is not possible to estimate or control the mFDR. The SAM method is too liberal under all scenarios. The oracle null and empirical null are too liberal in combination with the of Wilcoxon rank sum test. This may be due to the discrete nature of the data, which results in a discrete distribution of the test statistic. The resample null distribution uses random tiebreaking in the calculation of the resample test statistics, which may yield a smoother estimate of the collapsed random null than the empirical one (notice that the oracle distribution under the joint null ($\pi_0=1$) is simply an estimate the observed distribution of all test statistics, the empirical null of the central part of the test statistics). The resample null has an inflated FDR in combination with the t-test on the mock datasets. All methods struggle to control the FDR when applied to the Vandeputte2017 dataset, perhaps because its high flow cytometry counts cause extreme observations.
+
+\cnp
+
+#### H1
+
+```{r paramTest, fig.cap = "FDP and sensitivity under parametric simulation under H1, as a function of template dataset (top). Black diamonds represent estimated FDR, blue diamonds the estimated mFDR \\label{supfig:parSim1}"}
+parSimPlot = resPlot(filterLevelsPlot(resultsParamSim, levels = levelsPlot2, labels = labelsPlot2), c("Test","FoldChange","p0","FoldChangeType", "samSize","Correlation"), c("wilcox.test", 5, 0.75, "seq", 50, "Cor+FC"), rows = "Criterion", cols = "Template", showFdr = TRUE)
+parSimPlot
+ggsave(plot = parSimPlot, filename = "Manuscript/Figures/parSimPlot.pdf", device = "pdf")
+```
+
+```{r paramTest2, fig.cap = "FDP and sensitivity under parametric simulation under H1, as a function of proportion of null taxa (top). Black diamonds represent estimated FDR, blue diamonds the estimated Fdr.\\label{supfig:parSim2}"}
+resPlot(filterLevelsPlot(resultsParamSim, levels = levelsPlot2, labels = labelsPlot2), c("Test","FoldChange","Template","FoldChangeType", "samSize","Correlation"), c("wilcox.test", 5, "Props2016", "seq", 50, "Cor+FC"), rows = "Criterion", cols = "p0", showFdr = TRUE)
+```
+
+```{r paramTest3, fig.cap = "FDP and sensitivity under parametric simulation under H1, as a function of proportion of null taxa (top). Black diamonds represent estimated FDR, blue diamonds the estimated Fdr.\\label{supfig:parSim3}"}
+resPlot(filterLevelsPlot(resultsParamSim, levels = levelsPlot2, labels = labelsPlot2), c("p0","FoldChange","Template","FoldChangeType", "samSize","Correlation"), c("0.75", 5, "Props2016", "seq", 50, "Cor+FC"), rows = "Criterion", cols = "Test", showFdr = TRUE)
+```
+
+```{r paramTest4, fig.cap = "FDP and sensitivity under parametric simulation under H1, as a function of proportion of null taxa (top). Black diamonds represent estimated FDR, blue diamonds the estimated Fdr.\\label{supfig:parSim4}"}
+resPlot(filterLevelsPlot(resultsParamSim, levels = levelsPlot2, labels = labelsPlot2), c("p0","FoldChange","Criterion","FoldChangeType", "samSize","Test"), c("0.75", 5, "FDP", "seq", 50, "wilcox.test"), rows = "Template", cols = "Correlation", showFdr = TRUE)
+```
+
+```{r paramTest5, fig.cap = "FDP and sensitivity under parametric simulation under H1, as a function of proportion of null taxa (top). Black diamonds represent estimated FDR, blue diamonds the estimated Fdr.\\label{supfig:parSim5}"}
+resPlot(filterLevelsPlot(resultsParamSim, levels = levelsPlot2, labels = labelsPlot2), c("p0","FoldChange","Template","FoldChangeType", "Correlation","Test"), c("0.75", 5, "Props2016", "seq", "Cor+FC", "wilcox.test"), rows = "Criterion", cols = "samSize", showFdr = TRUE)
+```
+
+```{r simSimSeqGroupPlot, fig.cap = "FDP and sensitivity under non-parametric simulation under H1 as a function of template dataset (top).  Black diamonds represent estimated FDR, blue diamonds the estimated Fdr.\\label{supfig:nonparSim1}"}
+resPlot(filterLevelsPlot(resultsSimSeq, levels = levelsPlot2, labels = labelsPlot2), c("Test","p0","samSize","Cor"), c("wilcox.test", "0.75", 20, "Cor+FC"), rows = "Criterion", cols = "Template", showFdr = TRUE)
+```
+
+```{r simSimSeqsamSize, fig.cap = "FDP under non-parametric simulation, as a function of sample size (top) and fraction of null taxa (right).  Black diamonds represent estimated FDR, blue diamonds the estimated Fdr.\\label{supfig:nonparSim2}"}
+nonParSimPlot = resPlot(filterLevelsPlot(resultsSimSeq, levels = levelsPlot2, labels = labelsPlot2), c("Test","Template","samSize","Cor"), c("wilcox.test", "Props2016", 20, "Cor+FC"), rows = "Criterion", cols = "p0", showFdr = TRUE)
+nonParSimPlot
+ggsave(plot = nonParSimPlot, filename = "Manuscript/Figures/nonParSimPlot.pdf", device = "pdf")
+```
+
+```{r simSimSeqSamSizePlot, fig.cap = "FDP and sensitivity under non-parametric simulation under H1 as a function of template dataset (top).  Black diamonds represent estimated FDR, blue diamonds the estimated Fdr.\\label{supfig:nonparSim3}"}
+resPlot(filterLevelsPlot(resultsSimSeq, levels = levelsPlot2, labels = labelsPlot2), c("Test","p0","Template","Cor"), c("wilcox.test", "0.75", "Props2018", "Cor+FC"), rows = "Criterion", cols = "samSize", showFdr = TRUE)
+```
+
+```{r simSimSeqTemplatePlot, fig.cap = "FDP and sensitivity under non-parametric simulation under H1 as a function of template dataset (top).  Black diamonds represent estimated FDR, blue diamonds the estimated Fdr.\\label{supfig:nonparSim4}"}
+resPlot(filterLevelsPlot(resultsSimSeq, levels = levelsPlot2, labels = labelsPlot2), c("samSize","p0","Template","Cor"), c(20, "0.75", "Props2016", "Cor+FC"), rows = "Criterion", cols = "Test", showFdr = TRUE)
+```
+
+All methods become more liberal as there are less truly DAA taxa, and with the Vandeputte2017 data. The FDP exceeds the nominal level more often with the Wilcoxon rank sum test than with the t-test. The sample size did not affect the results, except that the sensitivity increased with growing sample size (results not shown). The presence of correlation between the features reduces the variability of the FDP for the empirical null, the resample null and the oracle null method and for SAM. On the other hand it increases the variability of the FDP for the Benjamini-Hochberg correction and for the standard normal null. Overall the resample null, standard normal null and Benjamini-Hochberg control the FDR best at the nominal level with least variability, of which the resample null achieves the highest power.
+
+The data generation paradigm of _SimSeq_ breaks the correlation between DAA and non-DAA genes, only retaining correlation within DAA and within non-DAA taxa This may explain the poor performance of the resample null method, as the resamples null exploits the presence of correlation.
+
+## Real data analysis
+\label{sec:realData}
+
+### Differential absolute abundance tests
+
+Tests for differential absolute abundance were performed using Wilcoxon rank sum test in case of 2 groups and Kruskal-Wallis test in case of more groups. The histograms of the corresponding z-values are shown in Figure \ref{supfig:histReal}. The two Props datasets exhibit some underdispersion, the test statistics from the Vandeputte2017 dataset seem shifted and skewed to the left.
+
+```{r obsTestStats, fig.cap = "Histograms of z-values corresponding to the Wilcoxon rank sum test for the Props2016, Props2018 and Vandeputte2017 datasets. Standard normal density is overlaid in black solid line. \\label{supfig:histReal}"}
+if(!file.exists("realResults/obsRes.RData")){
+obsTestList = mcmapply(mc.cores = 3, phyList[1:3], groupVars[1:3], concVars[1:3], FUN = 
+                         function(phy, groupName, concName){lapply(tests, function(test){testDAA.phylo(physeq = phy, groupName = groupName, FCname = concName, test = test)})}, SIMPLIFY = FALSE)
+save(obsTestList, file  = "realResults/obsRes.RData")
+} else {load("realResults/obsRes.RData")}
+obsZvalsList = sapply(obsTestList, function(x){x$wilcox.test$zValObs})
+par(mfrow = c(1,3))
+foo = sapply(phyNames[1:3], function(name){hist(obsZvalsList[[name]], main = name, xlab ="z-statistics", freq = FALSE, ylim = c(0, 1.2), breaks = 50)
+lines(x = seq(min(obsZvalsList[[name]]), max(obsZvalsList[[name]]), length.out = 1e4), y = dnorm(seq(min(obsZvalsList[[name]]), max(obsZvalsList[[name]]), length.out = 1e4)))
+})
+par(mfrow = c(1,1))
+```
+
+Multiplicity correction is then performed using Benjamini-Hochberg \cite{Benjamini1995}, using an empirical null distribution \cite{Efron2001} and using our resampling method with 1,000 resamples. Features with estimated Fdr below $`r sigLevel`$ are considered significant. For the Props2018 dataset, the empirical null distribution fit failed, and no taxa were declared significant.
+
+```{r realMultCorr, fig.cap = "\\label{supfig:Venn}Venn diagrams of significant taxa after correction with different multiple testing methods. The total number of taxa is shown bottom right.", fig.height = 10}
+# BH correction
+## Make p-values
+pValsList = lapply(obsZvalsList, function(zvals){
+  pVals = 2*sapply(pnorm(zvals), function(cdf) min(cdf, 1-cdf))
+  return(pVals)
+})
+## Adjusted p-values
+adjPValsList = lapply(pValsList, p.adjust, method = "BH")
+#Standard normal null
+standardNullList = lapply(obsZvalsList, function(x){getTheorFdr(x, zSeq = x)$Fdr})
+# Empirical null
+empNullFitList = lapply(obsZvalsList, function(x){getLocFdr(x)})
+empNullFdrList = lapply(empNullFitList, function(x){x$Fdr})
+# Resample random null
+resampleNullFdrList = lapply(obsTestList, function(x){x$wilcox.test$Fdr})
+# Lists of significant taxa
+sigTaxa = mapply(adjPValsList, standardNullList, empNullFdrList, resampleNullFdrList, 
+                 FUN = function(adjP, standard, emp, resample){
+                   sapply(list("Benjamini-Hochberg" = adjP, "Standard normal" = standard, "Empirical null" = emp, 
+                               "Resample null" = resample), function(x){
+                                 tmp = x<sigLevel
+                               })
+                 }, SIMPLIFY = FALSE)
+par(mfrow = c(3,1))
+for (i in names(sigTaxa)){
+tmp = vennDiagram(vennCounts(sigTaxa[[i]]), main =i)
+}
+```
+
+```{r exportVenn, include = FALSE}
+foo = pdf("Manuscript/Figures/VennDiagram.pdf")
+par(mfrow = c(3,1))
+for (i in names(sigTaxa)){
+tmp = vennDiagram(vennCounts(sigTaxa[[i]]), main = i)
+}
+dev.off()
+par(mfrow = c(1,1))
+```
+
+Figure \ref{supfig:Venn} shows that the resample null method makes more discoveries than the Benjamini-Hochberg correction in all datasets, which is consistent with the simulation results.
+
+# Code and data availability
+
+The R-code for performing multiplicity correction using resamples is available as the *rransi* R-package on GitHub at https://github.com/CenterForStatistics-UGent/rransi. The code for running the simulations and making the graphs, as well as the datasets used are available online.

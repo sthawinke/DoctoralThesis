@@ -1,0 +1,1238 @@
+---
+title: "Sequence count data are poorly fit by the negative binomial distribution"
+subtitle: "Supplementary material"
+author: |
+  | Stijn Hawinkel$^1$, J. C. W. Rayner$^{2,3}$, Luc Bijnens$^{4,5}$ and Olivier Thas$^{1,3,5}$
+  | \hspace{5pt}
+  | $^1$ Department of Data Analysis and Mathematical Modelling, Ghent University, Belgium
+  | $^2$ Centre for Computer-Assisted Research Mathematics and its Applications, School of Mathematical and Physical Sciences, University of Newcastle, Australia
+  | $^3$ National Institute for Applied Statistics Research Australia (NIASRA), University of Wollongong, Australia
+  | $^4$ Quantitative Sciences, Janssen Pharmaceutical companies of Johnson and Johnson, Belgium
+  | $^5$ Center for Statistics, Hasselt University, Belgium
+output:
+  pdf_document:
+    includes:
+      in_header: packagesGoF.sty
+    keep_tex: yes
+    number_sections: true
+bibliography: norm.bib
+---
+
+\tableofcontents
+
+\beginsupplement{0}
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, cache = TRUE, eval = TRUE, fig.height = 4, 
+                      fig.width = 7)
+#Load required packages
+reqpkg <- c("phyloseq", "ggplot2", "parallel", "nleqslv", "MASS", "fdrtool", 
+            "reshape2", "xtable", "edgeR", "DESeq2", "muStat")
+for(i in reqpkg)
+{#
+  library(i, quietly = TRUE, verbose = FALSE, warn.conflicts = FALSE, 
+          character.only = TRUE)
+};rm(i)
+#Source necessary functions
+for(j in list.files("R")){source(file.path("R",j))};rm(j) #Smooth test
+for(j in list.files("auxFun")){source(file.path("auxFun",j))};rm(j)#Auxiliary functions
+options(digits = 3)
+nCores = 4 #Number of cores to be used in parallel calculations (only UNIX systems)
+```
+
+```{r defParams}
+#Define some parameters to generate data
+n = 150
+s = 10^rnorm(n,4,0.5)
+phi = 2
+od = 1/phi
+x = cbind(1,rep(c(0,1), each = n/2), sample(c(0,1), n, replace = TRUE))
+beta0 = log(0.001)
+beta1 = log(2)
+beta2 = -log(2)
+Nsim = 1e3
+mu = exp(x %*% c(beta0, beta1, beta2))*s
+y = rnbinom(n, mu = mu, size = od)
+h0 = function(y,...){rep.int(1L, length(y))}
+b1 = function(y,...){1+y}
+b2 = function(y,...){1+y+y^2}
+b3 = function(y,...){1+y+y^2+y^3}
+b4 = function(y,...){1+y+y^2+y^3+y^4}
+h1ana = function(y, mu,od, x,...){(y-mu)/sqrt(mu+mu^2/od)}
+```
+
+# Introduction
+
+This document provides background information for the manuscript titled "Sequence count data are poorly fit by the negative binomial distribution". First the negative binomial regression model for sequence count data is described in detail. Next, smooth tests for goodness of fit for regression models with nuisance parameters are introduced. Thirdly the datasets used in this publication are presented and explored. Then the results of the goodness-of-fit tests are shown and an exploration of the type of lack of fit is presented. Finally presence of zero-inflation and the validity of the single dispersion assumption are investigated.
+
+# The negative binomial model
+
+## Data structure
+
+A typical sequence count matrix __Y__ consists of $n$ rows (the samples) and $p$ columns (the features: bacterial taxa or OTUs, or genes). __X__ is an $n\times d$ design matrix of sample specific variables with intercept in the first column. 
+
+## The negative binomial distribution
+
+Every feature is assumed to have a negative binomial (NB) distribution with unique parameters $\boldsymbol{\eta}^t_k = (\boldsymbol{\beta}_k^t, \phi_k)$ for the k$_{th}$ feature.
+
+$$Y_{ik} \sim \text{NB}(\mu_{ik}, \phi_k)$$
+with 
+
+\begin{equation}
+\label{eq:mean}
+E(Y_{ik}) = \mu_{ik} = \exp(\mathbf{x}_i^t\boldsymbol{\beta}_k)z_i
+\end{equation}
+
+in which $\boldsymbol{\beta}_k$ is the parameter vector of the k$^{th}$ feature, $\mathbf{x}_i$ is the vector with the regressors of sample $i$ (i.e. the $i$th row of $\mb{X}$), and \(z_i\) is the library size (the sum over all read counts of sample $i$,
+\(\sum_{k=1}^p y_{ik}\)), which is included as an offset.  The library size is assumed *known* since it is estimated based on _all_ features and is thus hardly affected by the counts of a single feature. The parameter \(\phi_k\) is the feature-specific dispersion parameter, such that
+
+\begin{equation}
+\var{Y_{ik}} = \mu_{ik} + \phi_k\mu_{ik}^2. 
+\label{eq:varianceNB}
+\end{equation}
+
+If $\phi_k=0$, the NB reduces to the Poisson distribution. Traditionally, the dispersion parameter \(\phi_k\) is considered
+constant for one feature over the different treatment groups
+\cite{Robinson2007}, as is indicated by the single subscript. We also make this assumption, but we investigate its validity later in the document in section \ref{sec:singleDisp}.
+
+The NB probability mass function is then given by
+
+\[\prob{Y_{ik}=y} = f(y;\mu_{ik}, \phi_k) = \frac{\Gamma\left(y+\frac{1}{\phi_k}\right)}{y!\Gamma\left(\frac{1}{\phi_k}\right)}\left(\frac{\mu_{ik}\phi_k}{1+\mu_{ik}\phi_k}\right)^y\left(\frac{1}{1+\mu_{ik}\phi_k}\right)^{\frac{1}{\phi_k}},\]
+for y = 0, 1, $\hdots$ and with \(\Gamma(\cdot)\) the gamma function.
+
+For the remainder of the document we will focus on a single feature, and drop the feature subscript $k$.
+
+## Parameter estimation
+
+The NB distribution is notoriously difficult to fit. Especially the estimation of the dispersion parameter is problematic (particularly for small sample sizes), and it is often estimated using an empirical Bayes procedure that allows for information sharing between the features \cite{Robinson2007}. 
+
+However, since we will develop the smooth tests in the maximum likelihood framework, all parameters will be estimated through maximum likelihood. This entails iteration between estimation of the dispersion $\phi$ and regression parameters $\boldsymbol{\beta}$ \cite{Lawless1987}.
+
+With \emph{l} the log likelihood of the negative binomial distribution, the score statistics are given by \cite{Lawless1987}
+
+\[\frac{\partial l}{\partial \beta_m} = \sum_{i=1}^n \frac{x_{im}(y_i-\mu_i)}{1+\mu_i\phi}, \;\;\; m=1,\ldots, d\]
+with $x_{im}$ the $(i,m)$ element of $\mb{X}$, and
+
+\[\frac{\partial l}{\partial \phi} = \sum_{i=1}^n \Psi\left(y_i+\frac{1}{\phi}\right) - \Psi\left(\frac{1}{\phi}\right) + \log\left(\frac{1}{1 +\phi\mu_i}\right) +1  - \frac{(y_i\phi+1)}{1+\phi\mu_i},\]
+with \(\Psi(.)\) the digamma function, i.e. the derivative of the gamma function.
+
+# Smooth tests for the negative binomial distribution \label{supsec:smoothTest}
+
+## Introduction to smooth tests
+
+Smooth goodness of fit tests were initially introduced by Neyman \cite{Neyman1937}, and later extended by Rayner and Best \cite{Rayner1990}. We refer to the monograph of \textcite{Rayner2009} for a comprehensive overview of smooth tests. These smooth tests were developed for testing the null hypothesis that a sample of i.i.d. observations comes from a hypothesized distribution which may depend on a vector of nuisance parameters. This problem is known as the \emph{one-sample problem}. In our context, however, the sample observations are not identically distributed: their means depend on an offset and on regressors. Rippon \cite{Rippon2013} further extended smooth tests to regression models, but the negative binomial regression model was not included. In this document we derive a smooth test for the NB regression model; the construction is slightly different from the traditional approach. 
+
+The null hypothesis of interest is that the $n$ sample observations $Y$ are distributed with the NB density function $f(y;\mu_i,\phi)$ for each of its elements $i$ ($i=1,\ldots, n$), with mean $\mu_i$ and dispersion parameter $\phi$. The parameters $\mu_i$ (or the $\beta$-parameters involved in the model for $\mu_i$) and $\phi$ are not fixed under the null hypothesis, and hence should be estimated from the data. In the context of goodness of fit testing, these parameters are referred to as \emph{nuisance parameters}. 
+
+The construction of a smooth test generally starts with embedding the hypothesized density function into a broader family of density functions. This broader family is known as the \emph{smooth alternative}, because it varies smoothly from the hypothesized density function. In particular, this smooth alternative $f_{sa}$
+for observation $i$ is of the form
+
+\begin{equation}
+ \label{Eq_SmoothAlt}
+f_{sa}(y;\mu_i,\phi,\mb\theta)=C(\boldsymbol{\theta}, \mu_i, \phi)\exp\Big(\sum_{j=1}^J\theta_jh_j(y; \mu_i, \phi)\Big)f(y; \mu_i, \phi)
+\end{equation}
+
+with \(\{h_j(y; \mu_i, \phi)\}\) a set of basis functions (see further for more details), $\mb\theta^t=(\theta_1,\ldots, \theta_J)$ a vector of embedding parameters, and \(C(\boldsymbol{\theta}, \mu_i, \phi)\) is the normalization constant (to make the sum of the smooth alternative over $y=0,1,\ldots$ converge to 1). Note that with $\mb\theta=\mb{0}$ the smooth alternative collapses to the hypothesized density function, and, hence, the original goodness of fit null hypothesis is now reduced to $\mb\theta=\mb{0}$. Since the $\theta$-parameters appear in a proper density function, the hypothesis testing can be performed in a likelihood-framework. In particular, smooth tests are basically score tests, which have the practical advantage that parameters only need to be estimated under the null hypothesis (i.e. in the NB regression model) and hence the $\theta$-parameters do not need to be estimated. 
+
+The choice of the basis functions \(\{h_j(y; \mu_i, \phi)\}\) gives flexibility to the researcher to focus the power of the smooth test on alternatives of primary interest. Often such alternatives are not well known or such alternatives are formulated in general terms. For example, alternatives for which the variance, skewness or kurtosis are not in agreement with the hypothesized family of distributions. In that case, the basis functions are often chosen to be polynomial, i.e. $h_j$ is a polynomial of degree $j$. We refer to \textcite{Rayner2009} and \textcite{Thas2010} for detailed discussions on the interpretation of smooth tests in terms of deviating moments. If no nuisance parameters are to be estimated (e.g. the $\mb{\beta}$ and $\phi$ parameters in the NB distribution are known), a convenient choice of polynomials is given by a set of \emph{orthonormal} polynomials on the hypothesized distribution, i.e. the polynomials $h_j(y; \mu_i, \phi)$ must satisfy
+\begin{equation}
+  \label{Eq_OrthNorm}
+  \sum_{y=0}^{+\infty} h_j(y; \mu_i, \phi) h_l(y; \mu_i, \phi) f(y; \mu_i, \phi) = \delta_{jl}
+\end{equation}
+with $\delta_{jl}=1$ if $j=l$ and $0$ otherwise. With this choice, the score test statistics for testing $\theta_j=0$ and $\theta_l=0$ are asymptotically independently distributed under the null hypotheses, which results in a smooth test statistic (for jointly testing that all $\theta$s are zero) that can be conveniently written as a sum of such components. 
+However, when nuisance parameters need to be estimated, the independence property often vanishes. This does not necessarily affect the power of the test, but the smooth test statistic no longer has a simple form as the sum of components. Independence can be regained by orthogonalising the basis functions to the score functions of the nuisance parameters. We call $\mb{\eta}^t = (\mb{\beta}^t, \phi) = (\eta_1,..., \eta_{d+1})$ the vector of nuisance parameters of the negative binomial distribution, and $s_m(y;\eta_m)=\partial \log  f(y; \mu_i, \phi) / \partial \eta_m$ the score function of the nuisance parameter $\eta_m$ in the hypothesized NB model. We now also require for all $j=1,\ldots, J$ and for all $m = 1,\ldots,d+1$, 
+\begin{equation}
+    \label{Eq_OrthScore}
+    \sum_{y=0}^{+\infty} h_j(y; \mu_i, \phi) s_m(y; \eta_m) f(y; \mu_i, \phi) = 0.
+\end{equation}
+This orthogonalisation to the nuisance score functions is, however, not part of the conventional approach to the construction of smooth tests, but the resulting test is equivalent to the conventionally constructed smooth test. Basis functions satisfying (\ref{Eq_OrthNorm}) and (\ref{Eq_OrthScore}) directly point into directions of the important alternative, without ``spoiling'' power into directions that are consistent with the hypothesized model. 
+
+For some distributions the score functions of the nuisance parameters coincide with one or more basis functions. This often happens for nuisance parameters related to the mean and variance, for which the score functions are polynomials of order one and two. In that case, the corresponding components of $\mb\theta$ are exactly zero. In these circumstances the corresponding terms are first removed from the smooth alternative (\ref{Eq_SmoothAlt}) before constructing the smooth test. For other distributions, the score functions of the nuisance parameters do not coincide with basis functions. However, for these distributions it may happen that the score functions and a few lower order basis functions are approximately linearly dependent on the hypothesized distribution (i.e. their inner product as defined in (\ref{Eq_OrthScore}) is large). This happens e.g. for nuisance parameters related to the mean and the variance of distributions for which maximum likelihood and method of moments estimators are different. The NB distribution is one example. It has been argued that for these distributions, the corresponding terms may also be removed from the smooth alternative \cite{Rayner2009}.
+
+The order $J$ of the smooth alternative can be either fixed to a rather small order (4, 5, or 6) or an adaptive procedure can be used for choosing $J$ based on the data (the maximal order $J$ may then often be set to 10). The advantage of the latter is that the resulting test will have power for a larger family of alternatives, but the adaptive test looses some power for the lower order alternatives. Since we believe that particularly the lower order alternatives, which deviate from the NB model in e.g. skewness and kurtosis, are the more important, we will fix $J=4$. We refer to \textcite{Rayner2009} and \textcite{Thas2010} for comparisons between fixed $J$ and data-driven $J$ based tests. 
+
+## Smooth tests for the negative binomial distribution
+
+In this section the construction for the smooth test for the NB distribution of order $J=4$ is given in some detail. 
+
+### Basis functions
+
+We start from a set of polynomial basis functions. In the smooth alternative (\ref{Eq_SmoothAlt}) the terms related to the first two polynomial basis functions are removed, because these basis functions are very close to the nuisance parameter score functions. 
+
+#### Gram-Schmidt orthogonalization
+
+We will use a more generic notation for the orthonormality conditions in (\ref{Eq_OrthNorm}) and (\ref{Eq_OrthScore}). Orthogonalisation can be seen as the calculation of residuals of elements in a Hilbert space, after orthogonal projection onto another element. Smooth tests are constructed in the Hilbert space of functions of $y\in \mathbb{N}$, equipped with inner product given by
+\begin{equation}
+  \label{eq:innerProd}
+  \langle a , b \rangle_f = \sum_{y=0}^{+\infty} a(y) b(y) f(y),
+\end{equation}
+for arbitrary Hilbert space elements $a$ and $b$ and for a density function $f$. Note that this inner product, and hence the Hilbert space, is defined by density function $f$. If $f$ is the NB density $f(y;\mu_i,\phi)$, this means that for each pair of $\mu_i$ (or, equivalently, $\mb\beta$) and $\phi$, another Hilbert space is defined. In what follows, the dependence on $f$ will often be omitted; so we will simply write $\langle a , b \rangle$.
+
+As before, with $\mb\eta^t=(\mb\beta^t,\phi)$ the vector of nuisance parameters, the score function of $\mb\eta$ is denoted by $s(y;\mb\eta)=\partial \log  f(y; \mu_i, \phi) / \partial \mb\eta$. For simplicity, we assume that there is only one regressor ($d$=2) such that $\mb{\beta}^t = (\beta_0, \beta_1)$ and $\mathbf{x}_i^t = (1, x_{i1})$.
+
+Gram-Schmidt orthogonalization is a procedure to produce 
+a function that is orthogonal to a given set of functions. We use it to construct the orthogonal basis
+functions \(h_j\) orthogonal to
+the nuisance score function $s$ and all previous basis functions $h_0, h_3,\ldots, h_{j-1}$. Note that $h_1$ and $h_2$ are removed, because they are too close to the nuisance score functions. The (normalised) polynomial of order zero is $h_0(y)=1$. 
+
+The procedure is initialised with an arbitrary polynomial of order 3. We take the simple form,
+
+\[h_3^\text{init}(y) = 1 + y + y^2 + y^3\]
+
+and apply the Gram-Schmidt orthogonalization procedure:
+\[
+h_3(\cdot;\mb\eta) = h_3^\text{init}(\cdot) -\left\langle h_3^\text{init} , s_{\beta_0}(\cdot;\mb\eta)\right\rangle \frac{s_{\beta_0}(\cdot;\mb\eta)}{\| s_{\beta_0}(\cdot;\mb\eta)\|}
+-\left\langle h_3^\text{init} , s_{\beta_1}(\cdot;\mb\eta)\right\rangle \frac{s_{\beta_1}(\cdot;\mb\eta)}{\| s_{\beta_1}(\cdot;\mb\eta)\|}
+-\left\langle h_3^\text{init} , s_{\phi}(\cdot;\mb\eta)\right\rangle \frac{s_{\phi}(\cdot;\mb\eta)}{\| s_{\phi}(\cdot;\mb\eta)\|}
+-\left\langle h_3^\text{init} , h_0\right\rangle \frac{h_0}{\| h_0\|}
+\]
+in which $s_{\beta_0}$, $s_{\beta_1}$ and $s_{\phi}$ are the components of score function $s(y;\mb\eta)$ and $\| \cdot \|$ denotes the squared norm (the inner product (\ref{eq:innerProd}) of a Hilbert space element with itself).
+With this $h_3$, the function $h_4$ is  computed  by applying the Gram-Schmidt procedure, starting from 
+\[
+  h_4^\text{init}(y)=1 + y + y^2 + y^3+y^4.
+\]
+In particular,
+\begin{eqnarray*}
+h_4(\cdot;\mb\eta) 
+   &=& h_4^\text{init}(\cdot) -\left\langle h_4^\text{init} , s_{\beta_0}(\cdot;\mb\eta)\right\rangle \frac{s_{\beta_0}(\cdot;\mb\eta)}{\| s_{\beta_0}(\cdot;\mb\eta)\|}
+-\left\langle h_4^\text{init} , s_{\beta_1}(\cdot;\mb\eta)\right\rangle \frac{s_{\beta_1}(\cdot;\mb\eta)}{\| s_{\beta_1}(\cdot;\mb\eta)\|}
+-\left\langle h_4^\text{init} , s_{\phi}(\cdot;\mb\eta)\right\rangle \frac{s_{\phi}(\cdot;\mb\eta)}{\| s_{\phi}(\cdot;\mb\eta)\|} \\
+& & -\left\langle h_4^\text{init} , h_0\right\rangle \frac{h_0}{\| h_0\|}
+      -\left\langle h_4^\text{init} , h_3\right\rangle \frac{h_3}{\| h_3\|}.
+\end{eqnarray*}
+
+#### Modified Gram-Schmidt \label{sec:MGS}
+
+The procedure described above is mathematically correct, but numerically imprecise, as rounding errors may accumulate. Instead the following sequence is calculated.
+
+$$h_{3a}(y) = h_3^{init} - \left\langle h_3^\text{init} , s_{\beta_0}(\cdot;\boldsymbol\eta)\right\rangle \frac{s_{\beta_0}(\cdot;\boldsymbol\eta)}{\| s_{\beta_0}(\cdot;\boldsymbol\eta)\|}$$
+$$h_{3b}(y) = h_{3a}(y) - \left\langle h_{3a} , s_{\beta_1}(\cdot;\boldsymbol\eta)\right\rangle \frac{s_{\beta_1}(\cdot;\boldsymbol\eta)}{\| s_{\beta_1}(\cdot;\boldsymbol\eta)\|}$$
+$$h_{3c}(y) = h_{3b}(y) - \left\langle h_{3b}, s_{\phi}(\cdot;\boldsymbol\eta)\right\rangle \frac{s_{\phi}(\cdot;\boldsymbol\eta)}{\| s_{\phi}(\cdot;\boldsymbol\eta)\|}$$
+$$h_{3d}(y) = h_{3c}(y) - \langle h_{3c}, h_0\rangle h_0$$
+
+This orthogonalizes with respect to errors in the previous orthogonalizations, a procedure called modified Gram-Schmidt (MGS) \cite{Rice1966}. A similar procedure is applied for finding $h_4$. 
+
+It is important to note that since the score function for the dispersion is not polynomial, neither are the $h_j(y)$ functions anymore after the orthogonalization. The first two steps of the orthogonalization are still with respect to polynomial score functions $s_{\beta_0}(\cdot;\boldsymbol\eta)$ and $s_{\beta_1}(\cdot;\boldsymbol\eta)$, and the inner products can be found analytically using the moment-generating function. The orthogonalization with respect to the score function of the dispersion $s_{\phi}(\cdot;\boldsymbol\eta)$ and between the functions h$_3$ and h$_4$ will have to occur numerically. This means that the sum defining the inner product as in (\ref{eq:innerProd}) is truncated after a large quantile, e.g. 1-10$^{-6}$.
+
+#### Visual representation of the basis functions
+
+```{r scoreStats}
+if(!file.exists(file = "scoreStatsH34vis.RData")){
+#Define parameters
+p = 1e2
+n = 1e2
+s = 10^rnorm(n,3,0.5)
+od = 0.5
+xFac = factor(sample(c(0,1,2),  n, replace = TRUE))
+x = model.matrix(~x, data.frame(x = xFac))
+beta0 = log(1/p)
+beta1 = log(2)
+beta2 = -log(2)
+mu = exp(x %*% c(beta0, beta1, beta2))*s
+#Generate NB data
+dataMat = matrix(rnbinom(n = n*p, size = od, mu = mu), n,p, byrow = FALSE)
+#Perform smooth test
+scoreStatsH34vis = smoothTestMat(dataMat, x, nCores = nCores, sEst = s, returnEvals = TRUE, truncQuantLow = 1e-8)
+save(scoreStatsH34vis, mu, file = "scoreStatsH34vis.RData")
+} else {load("scoreStatsH34vis.RData")}
+i = 2
+```
+
+h$_3$ and h$_4$ are basis functions that have been optimized to capture deviations of the observed densities from the hypothesized negative binomial density $f$. As explained before, they are no longer polynomial, and it may be informative to explore their shape. Examples of h$_3$ and h$_4$ are plotted in Figure \ref{supfig:visRep} for a negative binomial distribution with mean $\mu_i = `r mu[i]`$ and dispersion $\phi = `r 1/od`$. Observations much larger than the mean indicate excessive skewness and kurtosis, as could have been expected. For small values the interpretation is less straightforward. Evidently, these are only the basis functions for one particular combination of mean and dispersion parameters, but the similar trends are observed for other parameter values.
+
+```{r visRepresent, fig.cap = "\\label{supfig:visRep}Function values of the two basis functions (y-axis) for different outcome values (x-axis). The same basis functions are shown on a large scale (a) and a small scale (b). The discrete basis functions are represented by straight lines between their function values. Vertical red line indicates the mean."}
+#Plot basis functions
+ySeqVis = 0:20
+fy = scoreStatsH34vis[[2]][[1]][[i]]$targetFunEvals
+par(mfrow = c(1,2))
+#Zoom out
+ySeqVisOut = 0:min(100, nrow(fy)-1)
+plot(ySeqVisOut, fy[ySeqVisOut+1, 1], xlab = "y", ylab = "h(y)", main = "(a)", type ="l", ylim = range(fy[ySeqVisOut+1,]))
+lines(ySeqVisOut, fy[ySeqVisOut+1, 2], col = "blue")
+abline(v = mu[i], col = "red")
+abline(h=0, lty ="dashed")
+legend("top", legend = c("h3", "h4", "mu"), lty = 1, col = c("black","blue", "red"))
+#Close up
+plot(ySeqVis, fy[ySeqVis + 1, 1], xlab = "y",ylab = "h(y)", main = "(b)", type ="l", ylim = range(fy[ySeqVis+1,]))
+lines(ySeqVis, fy[ySeqVis + 1, 2], col = "blue")
+abline(v = mu[i], col = "red")
+# legend("topleft", legend = c("h3", "h4", "mu"), lty = 1, col = c("black","blue", "red"))
+abline(h=0, lty ="dashed")
+par(mfrow = c(1,1))
+rm(scoreStatsH34vis)
+```
+
+```{r polynomiality, eval = FALSE, purl = FALSE}
+# #Cubic fit
+x = seq(0, nrow(fy)-1)
+fit3 = lm(fy[, 1] ~ x + I(x^2) + I(x^3))
+plot(x, fy[,1], type = "l")
+lines(x, predict(fit3), col = "purple")
+plot(predict(fit3) - fy[,1]) #Close but not the same
+
+# #Quarctic fit
+fit4 = lm(fy[, 2] ~ x + I(x^2) + I(x^3) + I(x^4))
+plot(x, fy[,2], type = "l")
+lines(x, predict(fit4), col = "brown")
+plot(predict(fit4) - fy[,2])
+```
+
+### Smooth test statistic
+
+#### Score statistics
+
+The smooth test statistic is a quadratic form in the score statistics for $\theta_3$ and $\theta_4$ in (\ref{Eq_SmoothAlt}). Let $L(\mb\eta,\mb\theta)$ denote the likelihood function for a sample of $n$ observations with density function (\ref{Eq_SmoothAlt}).
+The score statistic for $\theta_j$ is given by
+\[
+  S_j(\mb\eta) = \frac{\partial}{\partial \theta_j} \log L(\mb\eta,\mb\theta) =
+  \sum_{i=1}^n h_j(y_i;\mb\eta,\mb{x}_i).
+\]
+Let 
+\[
+  \mb{V}(\mb\eta) = \frac{1}{\sqrt{n}} \begin{pmatrix}
+  S_3(\mb\eta) \\
+  S_4(\mb\eta) \end{pmatrix}.
+\]
+The components of $\mb{V}$ are referred to as the components of the smooth test. 
+When the unknown nuisance parameter $\mb\eta$ is replaced with its maximum likelihood estimate (MLE) under the null hypothesis, say $\hat{\mb{\eta}}$, the variance of $\mb{V}(\hat{\mb\eta})$ (again under the null hypothesis) is given by
+\[
+  \varf{0}{\mb{V}(\hat{\mb\eta})} = \mb{I}_{\theta\theta} - \mb{I}_{\theta\eta} \mb{I}_{\eta\eta}^{-1}\mb{I}_{\eta\theta},
+\]
+in which $\mb{I}_{\theta\theta}$, $\mb{I}_{\theta\eta}=\mb{I}_{\eta\theta}^t$ and  $\mb{I}_{\eta\eta}$ are elements of the information matrix
+\[
+  \mb{I} = \begin{pmatrix}
+    \mb{I}_{\eta\eta} & \mb{I}_{\eta\theta} \\
+    \mb{I}_{\theta\eta} & \mb{I}_{\theta\theta} 
+  \end{pmatrix}
+  = - \Ef{0}{\frac{\partial^2}{\partial (\mb\eta,\mb\theta) \partial (\mb\eta,\mb\theta)^t} \log L(\mb\eta,\mb\theta)}
+\]
+The elements of this information matrix are given in the next subsection. 
+
+#### Information matrix
+
+\begin{itemize}
+\tightlist
+\item
+  The matrix \(\mb{I}_{\theta\theta}=n\mb{I}_n\) (i.e. $n$ times the identity matrix). This is a consequence of the orthonormality of the basis functions $h_3$ and $h_4$.  
+  \[I_{\theta\theta} = \begin{bmatrix} 
+  n & 0 \\
+  0 & n \\
+ \end{bmatrix}
+\]
+
+\item
+  The matrix \(\mb{I}_{\eta\eta}^{-1}\) is  by construction the the variance-covariance matrix
+  of the estimator of the parameter $\mb\eta$ of the negative binomial regression \parencite{Lawless1987}.
+
+\[\mb{I}_{\eta\eta} = \begin{bmatrix} 
+  \sum_{i=1}^n \mu_i\frac{1+y_i\phi}{(1+\mu_i\phi)^2} & \sum_{i=1}^n \mu_ix_i\frac{1+y_i\phi}{(1+\mu_i\phi)^2} & 0\\
+  \sum_{i=1}^n \mu_ix_i\frac{1+y_i\phi}{(1+\mu_i\phi)^2} & \sum_{i=1}^n \mu_ix_i^2\frac{1+y_i\phi}{(1+\mu_i\phi)^2} & 0\\
+  0 & 0 & \sum_{i=1}^n \Psi_3(1/\phi) - \Psi_3(y_i-1/\phi) - \phi+\frac{2}{\mu_i+1/\phi} - \frac{y_i+1/\phi}{(\mu_i+1/\phi)^2}
+ \end{bmatrix}
+\]
+
+with \(\Psi_3\) the trigamma function, the second derivative of the
+gamma function.
+
+\item
+ Because of the imposed orthogonality of the basis functions and the score functions, all elements of the matrix  \(\mb{I}_{\theta\eta}\) are zero. 
+ \end{itemize}
+ 
+ This means that simply
+  \[
+  \varf{0}{\mb{V}(\hat{\mb\eta})} = \mb{I}_{\theta\theta}.
+\]
+
+#### Smooth test statistic
+
+The smooth test statistic is then given by
+\[
+   T=\mb{V}(\hat{\mb\eta})^t \mb{I}_{\theta\theta}^{-1} \mb{V}(\hat{\mb\eta}).
+\]
+
+### Distribution of the test statistic
+
+#### Convergence to the asymptotic null distribution 
+
+By the theory of smooth tests, the smooth test statistic $T$ asymptotically has a $\chi^2_2$ null distribution, and its components are asymptotically standard normally distributed. However, the convergence may sometimes be slow. Since for the NB distribution it is known that convergence of its MLEs may be cumbersome \cite{Hawinkel2017}, we have empirically investigated the distributions of the test statistics for realistic sample sizes. 
+
+#### Normality assumption
+
+We set up a small simulation study to assess the properties of the test statistic under the null hypothesis. For this we simulate $n=10,000$ observations for $p = 100$ features. Baseline expression/abundance is $\exp(\beta_0) = 10^{-3}$. The samples are split in three groups according to a multinomial distribution with even probabilities for all three groups, the features are differentially abundant with fold changes of $\exp(\beta_1) = 2$ and $\exp(\beta_2) = -2$ with respect to the reference group. Library sizes $z_i$ were drawn from a log-normal distribution with base 10 whose logarithm has mean 10$^4$ and standard deviation 0.5. The dispersion parameter $\phi$ was set to 2. As evident from Figures \ref{supfig:qqnorm} and \ref{supfig:variance}, the component and smooth test statistics depart from normal / chi-squared distributions. We therefore suggest that for realistic sample sizes the parametric bootstrap is used for p-value calculation.
+
+```{r demoTestStatistic, fig.cap = "\\label{supfig:qqnorm}QQ-plots of observed smooth test components versus standard normal quantiles. Data were generated under the null hypothesis, i.e. using the negative binomial distribution. See text for details."}
+if(!file.exists("demo.RData")){
+  #Set parameters
+p = 1e2
+n = 1e4
+s = 10^rnorm(n,4,0.5)
+od = 0.5
+xFac = factor(sample(c(0,1,2),  n, replace = TRUE))
+x = model.matrix(~x, data.frame(x = xFac))
+beta0 = log(0.001)
+beta1 = log(2)
+beta2 = -log(2)
+mu = exp(x %*% c(beta0, beta1, beta2))*s
+#Generate data
+dataMat = matrix(rnbinom(n = n*p, size = od, mu = mu), n,p, byrow = FALSE)
+scoreStatsH34 = smoothTestMat(dataMat, x, nCores = nCores) #Perform smooth test
+save(n,p, scoreStatsH34, file= "demo.RData") #scoreStatsH3
+} else{load("demo.RData")}
+par(mfrow = c(1,2))
+qqnorm(scoreStatsH34[1,], main = "h3");qqline(scoreStatsH34[1,])
+qqnorm(scoreStatsH34[2,], main = "h4");qqline(scoreStatsH34[2,])
+par(mfrow = c(1,1))
+```
+
+```{r varianceSim, fig.cap = "\\label{supfig:variance}QQ-plot of the observed test statistic for joint test of skewness and kurtosis versus the expected quantiles of the chi-squared distribution with two degrees of freedom. Data were generated under the null hypothesis, i.e. using the negative binomial distribution. See text for details.", fig.width = 6}
+#qqplots versus chi-squared distribution
+plot(y = sort(scoreStatsH34[3,]), x = qchisq(p = seq_len(p)/p, df = 2), ylab = "Sample quantiles", xlab = "Theoretical quantiles", ylim = c(0,8));abline(0,1)
+rm(scoreStatsH34)
+```
+
+```{r estLibrarySizes, include = FALSE}
+if(!file.exists("estLibSizes.RData")){
+#Set parameters
+p = 200; n = 50
+x = cbind(1,rep(c(0,1), each = n/2))
+s = 10^rnorm(n,4,0.5)
+ods = 10^runif(p, -2,0)
+beta0sTmp = 10^runif(p, -6,-3)
+beta0s = beta0sTmp/sum(beta0sTmp)
+beta1 = 2
+# Generate data
+dataMat = matrix(rnbinom(n = n*p, size = ods, mu = outer(beta0s, s)*beta1^x[,2]), n,p, byrow = TRUE)
+# Smooth test
+scoreStatsH3est = smoothTestMat(dataMat, x, nCores = nCores)
+save(scoreStatsH3est, dataMat,x, file = "estLibSizes.RData")
+} else {load("estLibSizes.RData")}
+par(mfrow = c(1,2))
+qqnorm(scoreStatsH3est[1,]); qqline(scoreStatsH3est[1,])
+qqnorm(scoreStatsH3est[2,]); qqline(scoreStatsH3est[2,])
+qqnorm(scoreStatsH3est[1,], ylim = c(-3,3)); qqline(scoreStatsH3est[1,], ylim = c(-3,3))
+qqnorm(scoreStatsH3est[2,], ylim = c(-3,3)); qqline(scoreStatsH3est[2,], ylim = c(-3,3))
+par(mfrow = c(1,1))
+rm(scoreStatsH3est, dataMat)
+```
+
+```{r asymptoticDistribution}
+#Prepare paramters for the simulation
+p = 500; n = 50
+x = cbind(1,rep(c(0,1), each = n/2))
+s = 10^rnorm(n,4,0.5)
+beta0sTmp = 10^runif(p, -6,-3)
+beta0s = beta0sTmp/sum(beta0sTmp)
+beta1 = 2
+ods = c(1/30, 0.05, 10^c(-1,0,1,2))
+names(ods) = ods
+if(!file.exists("asymList.RData")){
+asymList = mclapply(mc.cores = 4, ods, function(Size){
+  #Monte Carlo loop not needed here either
+  #testList = lapply(integer(reps), function(Size){
+    dataMat = matrix(rnbinom(n = n*p, size = Size, mu = outer(beta0s, s)*beta1^x[,2]), n, p, byrow = TRUE)
+    smoothTestMat(mat = dataMat, x = x)
+  #})
+})
+save(asymList, file = "asymList.RData")
+} else {load("asymList.RData")}
+postscript("Paper/Figures/Fig2A.eps", height = 5, width = 8)
+par(mfrow = c(2,3))
+foo = lapply(names(asymList), 
+             function(Size){qplotUnif(pchisq(asymList[[Size]], df = 2), main = 1/as.numeric(Size))})
+par(mfrow = c(1,1))
+dev.off()
+```
+
+\newpage
+
+### Parametric bootstrap
+
+From the previous results it is clear that an alternative procedure is needed to determine the p-values, as no convergence to asymptotic distributions is achieved, even with as many as $n=10,000$ observations. Here we use the parametric bootstrap. This means that the parameters of the NB model are estimated from the data. Next, synthetic datasets are repeatedly generated under the NB model with these estimates as parameter values. For these synthetic datasets, the smooth test statistics are calculated as for the real data. The library sizes are estimated from the data, but are assumed known in the bootstraps. As all synthetic datasets follow the NB distribution, this yields the null distribution of the test statistic. Based on this null distribution, the p-value of the observed test statistic can be calculated. Note that the null hypothesis we are testing is that the NB distribution fits well, and has nothing to do with differential expression/abundance. 
+
+We test the parametric bootstrap on datasets generated under the NB model with with $n=50$ samples and $p=500$ features. As the value of the dispersion parameter is known to strongly affect the behaviour of tests statistics \cite{Hawinkel2017}, we generate a number of datasets with increasing overdispersion {0.001, 0.01, 1, 10, 20, 30} to test in which range of dispersions the p-value histogram is uniform.
+
+The baseline expression/abundance $\beta_0$ was drawn from a log-uniform distribution with base 10, with the exponent uniform on [-6,-3]. The samples are split randomly in two groups with even probabilities for both groups, the features are differentially abundant with fold changes of $\exp(\beta_1) = 2$. Library sizes $z_i$ were drawn from a log-normal distribution with base 10 whose logarithm has mean 4 and standard deviation 0.5. $B=100$ bootstrap samples were generated per value of the dispersion parameter.
+
+```{r genDatasetsOD}
+nBoots = 100
+#Generate the data and save them
+dir.create("testBootstrapOD", showWarnings = FALSE)
+save(x, file ="testBootstrapOD/x.RData")
+if(!file.exists("testList.RData")){
+fooList = mclapply(mc.cores =4, ods, function(Size){
+dir.create(paste0("testBootstrapOD/size", Size))
+dir.create(paste0("testBootstrapOD/size", Size, "/data"))
+dir.create(paste0("testBootstrapOD/size", Size, "/results"))
+  dataMat = matrix(rnbinom(n = n*p, size = Size, mu = outer(beta0s, s)*beta1^x[,2]), n, p, byrow = TRUE)
+  resMat = smoothTestMat(mat = dataMat, x = x)
+  origSaveFile = paste0("testBootstrapOD/size", Size, "/original.RData")
+  if(!file.exists(origSaveFile)) {save(dataMat, resMat, file = origSaveFile)}
+Libs = rowSums(dataMat)
+n = nrow(dataMat);p = ncol(dataMat)
+paramEsts = apply(dataMat, 2, function(y){
+    nbFit = glm.nb2(y = y, s = Libs, reg = x)
+    return(list(coef = nbFit$betas, theta = nbFit$theta))
+  })
+ySynts = lapply(seq_len(p), function(ii){
+  bootMat = matrix(rnbinom(n = n*nBoots, size = paramEsts[[ii]]$theta, mu = exp(x %*% paramEsts[[ii]]$coef)*Libs), n, nBoots, byrow = FALSE)
+  bootSaveFile = paste0("testBootstrapOD/size", Size, "/data/bootMat", ii, ".RData")
+if(!file.exists(file = bootSaveFile)) save(bootMat, file = bootSaveFile)
+})
+})
+#Perform the bootstraps (computer intensive!)
+testList = mclapply(mc.cores = 4, ods, function(Size){
+load(file = paste0("testBootstrapOD/size", Size, "/original.RData"))
+bootResList = lapply(seq_len(p), function(ii){
+load(paste0("testBootstrapOD/size", Size, "/data/bootMat", ii, ".RData"))
+  bootRes = try(smoothTestMat(mat = bootMat, x = x)["testStat", ], silent = TRUE)
+  if(class(bootRes)=="try-error") return(rep(NA, nBoots)) else return(bootRes)
+})
+bootResList = bootResList[colSums(dataMat)>0]
+pVals = sapply(seq_len(ncol(resMat)), function(ind){
+  mean(resMat["testStat", ind]>=bootResList[[ind]], na.rm = TRUE)
+})
+save(pVals, file = paste0("testList/testList", Size, ".RData"))
+pVals
+})
+names(testList) = ods
+save(testList, file = "testList.RData")
+} else {load("testList.RData")}
+failures = sapply(testList, function(x){mean(is.na(x))})
+```
+
+```{r histBootstraps, fig.cap ="\\label{supfig:histBootStraps}Histograms of bootstrapped p-values under the null hypothesis for different values of the dispersion parameter. The values of the dispersion parameters are shown in the graph titles.", fig.height = 5}
+par(mfrow = c(2,3))
+foo = lapply(names(testList), 
+             function(Size){hist(testList[[Size]], 
+                                 main = 1/as.numeric(Size), breaks = 30, xlim = c(0,1), xlab ="p-values")})
+par(mfrow = c(1,1))
+```
+
+```{r qqplotsBootstrap, fig.cap ="\\label{supfig:qqBootStraps}QQ-plots of the lower end of bootstrapped p-values for different values of the dispersion parameter. The values of the dispersion parameters are shown in the graph titles.", fig.height = 5}
+postscript("Paper/Figures/Fig2B.eps", height = 34, width = 16)
+par(mfrow = c(2,3))
+foo = lapply(names(testList), function(Size){qplotUnif(testList[[Size]], 
+                                                       main = 1/as.numeric(Size), 
+                                                       xlim = c(0,0.2), 
+                                                       ylim = c(0,0.2))})
+par(mfrow = c(1,1))
+dev.off()
+```
+
+From Figures \ref{supfig:histBootStraps} and \ref{supfig:qqBootStraps} it is clear that for dispersions larger than 10, the bootstrapped p-values are no longer uniform and the results cannot be trusted. Hence all features with dispersions larger than 10 will be filtered out prior to estimating the proportion of poorly fit features.
+
+\clearpage
+
+### Sampling distribution of the dispersion parameter
+
+To better understand the problems of convergence above, we investigate the sampling distribution of the dispersion parameter for various values of $\phi$. The simulation settings were the same as in Section \ref{normality-assumption}, except that no differential abundance/expression was introduced and the sample size was $n=100$. For the dispersion parameter $\phi$ values {0.001, 0.01, 0.1, 1, 5, 10, 50, 2, 500, 1000} were used, for each value 1000 samples were generated under the NB distribution. Next, the dispersion parameter was estimated through maximum likelihood.
+
+As can be seen from Figures \ref{supfig:BoxplotDispDistr}-\ref{supfig:histDispDistrLog}, the MLE of the dispersion parameter is unbiased in the range 0.1-100, but it is only close to 1 that the estimator follows a normal distribution. For values $\geq$ 5 or $\leq$ 0.1, the distribution of the estimator is right skewed. Also, on the log-scale a strong bimodality of the distribution of the estimator is visible.
+
+```{r dispSamplingDistribution, warning = FALSE, fig.cap ="Boxplots of estimated dispersion parameters. Blue triangles and values on the x-axis represent the true values, red diamonds are the average estimates. \\label{supfig:BoxplotDispDistr}"}
+ods = 10^c(-3,-2,-1,0,  log10(5), 1, log10(50), 2, log10(500) ,3) #Prepare a vector of dispersions
+names(ods) = ods
+n = 100
+relAbs = 1e-3
+libSizes = 10^rnorm(n,4,0.5)
+mu = relAbs * libSizes
+nSim = 1000
+#Repeat data generation and dispersion estimation to get an idea of the sampling distribution.
+if(!file.exists("odEsts.RData")){
+odEsts = sapply(1/ods, function(size){
+  sapply(integer(nSim), function(ii){
+      y = rnbinom(n = n, size = size, mu = mu)
+      1/glm.nb2(y = y, reg = matrix(1,n,1), s = libSizes)$theta
+  })
+})
+save(odEsts, file = "odEsts.RData")
+} else {load("odEsts.RData")}
+moltOD = melt(odEsts)
+boxplot(data = moltOD, value ~Var2, log = "y", 
+        xlab = "True dispersion parameter", 
+        ylab = "Dispersion parameter estimate")
+points(col  ="blue",pch = 2, x  = seq_along(ods), y = ods)
+points(col  ="red",pch = 23, x  = seq_along(ods), y = colMeans(odEsts, na.rm = TRUE))
+legend("topleft", legend = c("True value", "Mean estimate"), pch = c(2,23), col  = c("blue", "red"))
+```
+
+```{r histograms, fig.cap = "\\label{supfig:histDispDistr}Histograms of dispersion estimates. Blue line is the true value, red line the average estimate. The title of each graphs also shows the true dispersion.", fig.height = 8}
+#Histograms
+par(mfrow = c(3,4), mar = c(3,3,3,3))
+foo = lapply(ods, function(tt){hist(odEsts[,as.character(tt)], main  = as.character(tt), xlab = "Dispersion estimates");abline(v = tt, col  ="blue"); abline(v = mean(odEsts[,as.character(tt)]), col = "red") })
+par(mfrow = c(1,1))
+```
+
+```{r histogramsLogScale, fig.cap = "\\label{supfig:histDispDistrLog} Histograms of log10-dispersion estimates. Blue line is the true value, red line the average estimate. The title of each graphs also shows the true dispersion.", fig.height = 8}
+par(mfrow = c(3,4), mar = c(3,3,3,3))
+foo = lapply(ods, function(tt){hist(log10(odEsts[,as.character(tt)]), main  = as.character(tt), xlab = "log10 Dispersion estimates");abline(v = log10(tt), col  ="blue"); abline(v = log10(mean(odEsts[,as.character(tt)])), col = "red") })
+par(mfrow = c(1,1))
+#Clear bimodality on the log scale, is this relevant?
+```
+
+\clearpage
+
+\newpage
+
+## Estimating the proportion of features with a lack of fit \label{subseq:estLackFit}
+
+The eventual goal is to estimate the number of features poorly fit by the NB distribution, rather than identifying them. For this we leverage the fact that many features are being tested simultaneously, using the method developed by \textcite{Strimmer2008}.
+
+Crucial to this approach is the assumption that the distribution of p-values is a mixture between p-values of features for which the null hypothesis holds, and p-values of features for which the null hypothesis does not hold. The density of the p-values $f(P)$ can then be described as:
+
+$$f(P) = \pi_0f_0(P) + (1-\pi_0)f_A(P), \label{eq:estP0}$$
+
+with $f_0(P)$ the density of p-values under the null distribution, $f_A(P)$ the density of p-values under the alternative distribution and $\pi_0$ the mixing proportion. $f_0(P)$ is known to be uniform on [0,1]. $f_A(P)$ is skewed to the right, and some $P_c$ is assumed for which $f_A(P|P>P_c) = 0$. We employ the $fdrtool$ R-package \cite{Klaus2015} to estimate $P_c$, which does the estimation in an iterative manner. 
+\textcite{Strimmer2008} proposes a modified Grenander density estimator for $f(P)$. This estimator is similar to a non-parametric estimate of $f(P)$, with the additional restriction of being monotonically decreasing (since $f_A(P)$ is monotonically decreasing with $P$, and f$_0(P)$ is uniform, $f(P)$ must also be monotonically decreasing). $\pi_0$ is then estimated as
+
+$$\hat{\pi}_0 = \text{min}(1, \frac{\sum_{k=1}^p I(P_k>P_c)}{p}\frac{1}{1-\hat{F}(P)})$$ 
+
+with $\hat{F}(P)$ the distribution function corresponding to the estimate $\hat{f}(P)$. The quantity we are interested in is $1-\pi_0$, i.e. the proportion of features that is not well fit by the NB. This approach has a very particular advantage: there is no need for very precise p-values for this estimation procedure. This means that a low number of bootstrap samples suffice, which greatly reduces the computational burden.
+
+Even when a comparatively small percentage of features does not follow the NB distribution, this may still affect the analysis of an entire dataset. Typically, the negative binomial regression model is used to perform one test per feature. Next, one implements a multiple testing correction that works on the ensemble of p-values. Hence, a violation of the assumptions for some features can also affect the inference for features that _do_ follow the negative binomial distribution.
+
+\clearpage
+
+# Datasets \label{sec:datasets}
+
+We investigated following datasets for lack of fit to the NB distribution:
+
+ - **American Gut Project (AGP)** \cite{AGP2015}: A large dataset on the stool microbiome of healthy human volunteers.
+ - **Human Microbiome Project (HMP)** \cite{Peterson2009}: A large dataset of healthy human volunteers, with microbiome samples from many body sites. Subsets of this dataset from the following body regions will be used:
+    * Skin
+    * Vagina
+    * Oral cavity
+- **Colorectal cancer (Zeller)** \cite{Zeller2014}: The colorectal microbiome of healthy and colorectal cancer patients. Sequence counts are rounded prior to analysis.
+- **Armpit**  \cite{Callewaert2017}: Swabs from armpit microbiomes of human volunteers.
+- **Crohn's disease**  \cite{Vandeputte2017}: Gut microbiome of healthy and Crohn's diseased patients.
+- **Colorectal cancer (Kostic)** \cite{Kostic2014}: The colorectal microbiome of healthy and colorectal cancer patients.
+- **Squirrels**  \cite{Carey2013}: Seasonal changes of the gut microbiome of squirrels.
+- **Humanized mice** \cite{Turnbaugh2009}: Gut microbiomes of gnotobiotic mice that were inoculated with human feces, and then put on different diets.
+- **Cooling water** \cite{Props2016}: The bacterial communities of a cooling water circuit of a nuclear test plant.
+- **Lakes**  \cite{Props2018}: Microbiome samples from lakes Muskegon and Michigan throughout different seasons.
+- **Keyboard**  \cite{Fierer2010}: Swabs of the microbiome found on keys of a keyboard and on human fingertips.
+- **Neuroblastoma (cell line)** \cite{Assefa2018}: RNA-Seq dataset of neuroblastoma cell line data, treated by nutlin or ethanol.
+- **Human brain** \cite{Lonsdale2013}: RNA-Seq dataset of human gene expression in hypothalamus and hippocampus from the GTEx project.
+- **Neuroblastoma (human)** \cite{Zhang2015}: RNA-Seq dataset of neuroblastoma. Two groups are formed by tumors with and without amplification of the MYCN gene.
+  
+ On each of these datasets, negative binomial regression models were fit with one sample-specific variable as regressors. These variables were chosen for their biological interest, e.g. as potential candidate for differential expression/abundance testing. The sample-specific variables used, as well as a categorization of these datasets in terms of their origin and sequencing technology is shown in the following table:
+  
+  | \textbf{Dataset} \label{tab:datasets}| \textbf{Grouping variable} | \textbf{Origin}  | \textbf{Sequencing technology}|
+  |------------------|----------------------------|------------------|-------------------------
+  | AGP              | IBD status  | Human            | Illumina MiSeq |
+  | HMP skin         | Subregion                  | Human            | 454 pyrosequencing
+  | HMP vagina       | Subregion                  | Human            | 454 pyrosequencing |
+  | HMP oral cavity  | Subregion                  | Human            | 454 pyrosequencing |
+  | Colorectal cancer (Zeller)           | Cancer diagnosis           | Human            | Illumina MiSeq |
+  | Armpit           | Gender                     | Human            | Illumina MiSeq |
+  | Crohn's disease       | IBD status                 | Human            | Illumina MiSeq |
+  | Colorectal cancer (Kostic)           | Cancer diagnosis           | Human            | 454 pyrosequencing |
+  | Squirrels        | Hibernation state          | Mammal           | 454 pyrosequencing |
+  | Humanized Mice   | Diet                       | Mammal           | 454 pyrosequencing |
+  | Keyboard         | Sample location            | Inert surface    | 454 pyrosequencing |
+  | Cooling water        | Reactor phase              | Freshwater       | Illumina MiSeq |
+  | Lakes        | Lake                       | Freshwater       | Illumina MiSeq |
+  | Neuroblastoma (cell line)    | Ethanol/nutlin treatment                  | RNA-Seq          | Illumina MiSeq |
+  | Human brain             | Brain region               | RNA-Seq          | Illumina MiSeq |
+  | Neuroblastoma (human)            | MYCN amplification         | RNA-Seq          | Illumina MiSeq |
+
+Table \ref{tab:datasets}: Overview of the datasets under study and their characteristics
+    
+Other choices of grouping variables are possible in the datasets under study. Also, including more variables into the NB regression model may improve the fit to the NB distribution. Still for simplicity and comparability of the results on the different datasets we stick to this simple design.
+
+# Results
+
+## Distribution of the dispersion parameter
+
+The dispersion parameter $\phi$ allows the NB distribution to accommodate overdispersion (see Equation \ref{eq:varianceNB}), which is often encountered in sequence count data \cite{Robinson2007}. Large overdispersions are known to slow down convergence to asymptotic distributions of estimators and thus hinder accurate inference \cite{Hawinkel2017}. The degree of overdispersion is strongly correlated with the number of zero abundances. Hence the distribution of the feature-wise dispersion parameter within a dataset reflects its noise levels and sparsity.
+
+An overview of the distribution of the dispersion parameter per dataset is given in Figure \ref{supfig:dispDistr}. Features with only zeroes were trimmed prior to fitting the NB distribution. Datasets from human origin have larger overdispersion than the other datasets. The sequencing technology used seems unrelated to the dispersion distributions. For the RNA-seq data, the neuroblastoma cell line data has a smaller overdispersion than the RNA-Seq data from humans.
+
+```{r paramEsts, eval = FALSE}
+#Load in the data
+#AGP
+load("Datasets/AGphylo.RData")
+#HMP
+load("Datasets/HMPskin.RData");load("Datasets/HMPoralCavity.RData");load("Datasets/HMPvagina.RData")
+#Zeller
+load("Datasets/zellerData.RData")
+#Armpit
+load("Datasets/armpit.RData")
+#Nuclear
+load("Datasets/CMETdata.RData")
+#Lakes
+load("Datasets/lakesPhy.RData")
+#Crohn
+load("Datasets/SeqRaes.RData")
+#Kostic
+load("Datasets/Kostic.RData")
+#Keyboard
+load("Datasets/keyboard.RData")
+#Humanized mice
+load("Datasets/HumMicePhy.RData")
+#Squirrels
+load("Datasets/squirrels.RData")
+#Read in the RNAseq data, and put in phyloseq format
+neuroblastoma0 = readRDS("Datasets/celine_neuroblastoma_data.RData")
+neuroblastoma = phyloseq(otu_table(neuroblastoma0$counts[neuroblastoma0$mRNA,], taxa_are_rows = TRUE), sample_data(data.frame(group = neuroblastoma0$group, row.names = names(neuroblastoma0$counts))))
+GTEx0 = readRDS("Datasets/GTEx_data_full.RData")
+GTEx = phyloseq(otu_table(GTEx0$counts, taxa_are_rows = TRUE), sample_data(data.frame(group = GTEx0$group, row.names = colnames(GTEx0$counts))))
+Zhang0 = readRDS("Datasets/Kalisto_Zhang_data.RData")
+Zhang = phyloseq(otu_table(Zhang0$counts, taxa_are_rows = TRUE), sample_data(data.frame(group = Zhang0$group, row.names = colnames(Zhang0$counts))))
+
+#Estimate the parameters of the negative binomial distribution and save them
+estAndSave(AGphylo, "IBD", "AGP")
+estAndSave(HMPskin, "bodySite", "HMPskin")
+estAndSave(HMPvagina, "HMPbodysubsite", "HMPvagina")
+estAndSave(HMPoralCavity, "HMPbodysubsite", "HMPoralCavity")
+estAndSave(zellerSphy, "Diagnosis","Zeller",  round = TRUE)
+estAndSave(armpit, "gender","armpit")
+estAndSave(CMETwater, "Reactor.phase", "CMET")
+estAndSave(lakesPhy, "Lake", "Lakes")
+estAndSave(Joined, "Health.status", "Crohn")
+estAndSave(kostic, "TREATMENT", "Kostic")
+estAndSave(keyboard, "env_package", "keyboard")
+estAndSave(HumMicePhy, "Diet", "HumMice")
+estAndSave(squirrels, "state", "squirrels")
+# Also for the RNA-Seq data
+foo = mcmapply(mc.cores= 3, c("neuroblastoma" = neuroblastoma, "GTEx" = GTEx, "Zhang" = Zhang), rep("group",3), c("neuroblastoma","GTEx","Zhang"), FUN = estAndSave)
+
+#Define, reorder and save
+rawNames = c("AGP","HMPskin","HMPvagina","HMPoralCavity", "Zeller","armpit","Crohn","Kostic","HumMice","squirrels","CMET", "Lakes","keyboard", "neuroblastoma", "GTEx", "Zhang")
+tags = factor(x = rawNames,
+              labels = c("American gut project","HMPskin","HMPvagina","HMPoralCavity",
+                "Colorectal cancer (Zeller)","Armpit","Crohn's disease","Colorectal cancer (Kostic)",
+                "Humanized Mice","Squirrels","Cooling water", "Lakes", "Keyboard", "Neuroblastoma (cell line)", "Human brain", "Neuroblastoma (human)"), 
+              levels = rawNames, ordered = TRUE)
+vars = c("IBD","bodySite", "HMPbodysubsite", "HMPbodysubsite", "Diagnosis","gender","Health.status","TREATMENT","Diet","state", "Reactor.phase","Lake","env_package","group", "group", "group")
+Origin = factor(
+  c(rep("Human", 8), rep("Other mammals",2), rep("Water",2), "Inert surface", rep("RNA-Seq",3)), 
+  levels = c("Human","Other mammals","Water", "Inert surface", "RNA-Seq"), labels =  c("Human","Other mammals","Water", "Inert surface", "RNA-Seq"), ordered = TRUE)
+phyList = list(AGphylo, HMPskin, HMPvagina, HMPoralCavity, zellerSphy, armpit, Joined, kostic, HumMicePhy, squirrels,CMETwater, lakesPhy,  keyboard, neuroblastoma, GTEx, Zhang)
+phyList = lapply(phyList, function(phy){if(taxa_are_rows(phy)) t(phy) else phy})
+names(phyList) =  names(Origin) = names(seqTechs) = names(tags) = tags
+nSamples = sapply(phyList, nsamples)
+seqTechs = factor(c("Illumina","454","454","454","Illumina","Illumina","Illumina","454","454","454","Illumina","Illumina","454", "Illumina", "Illumina","Illumina"))
+paramList = lapply(rawNames, function(tag){load(file.path("HPCbootstrap/params",paste0(tag, "params.RData"))); get(paste0("params", tag))})
+names(paramList) = tags
+save(tags, nSamples, phyList, vars, seqTechs, Origin, paramList, rawNames, file ="tags.RData")
+rm(AGphylo, HMPskin, HMPvagina, HMPoralCavity, zellerSphy, armpit, Joined, kostic, HumMicePhy, squirrels,CMETwater, lakesPhy,  keyboard, neuroblastoma, GTEx, Zhang)
+```
+
+```{r dispersionDistributions, warning = FALSE, fig.cap = "Boxplots of dispersion parameters per dataset. The estimated dispersion parameters are shown on the x-axis, the dataset on the y-axis. The red horizontal line indicates an overdipsersion of 10, above which the smooth test is no longer reliable.\\label{supfig:dispDistr}", fig.height = 5}
+# load("tags.RData")
+dispList = lapply(paramList, function(x){x$theta})
+names(dispList) = tags
+odDF = melt(dispList)
+names(odDF) = c("Dispersion","Dataset")
+odDF$Dataset = factor(odDF$Dataset, levels = tags, labels = tags, ordered = TRUE)
+odDF$Origin = Origin[odDF$Dataset]
+odDFmerge = merge(odDF, data.frame("SequencingTechnology" = seqTechs, Dataset = levels(odDF$Dataset)))
+dispPlot = ggplot(aes(y = 1/Dispersion, x =  Dataset, fill = Origin, col = SequencingTechnology), data = odDFmerge) + geom_boxplot() + ylab("Estimated dispersion parameter")  + theme_bw() +  scale_y_continuous(trans ="log10", limits = c(1e-8,1e3), breaks = 10^seq(-8,4,by = 1))  + theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) + scale_fill_brewer(palette = "Accent", name = "Origin") + scale_colour_brewer(palette = "Dark2", name = "Sequencing \ntechnology") + geom_hline(yintercept = 10, col = "red", linetype ="dashed") + xlab("")
+dispPlot
+```
+
+```{r pdfDisp, include = FALSE}
+ggsave(plot = dispPlot, filename = "Paper/Figures/Fig1.eps", width = 5.7, height = 4.9)
+rm(dispPlot, odDFmerge, odDF, dispList)
+```
+
+### Failed estimations
+
+In some rare cases the negative binomial distribution cannot be fitted. We give an overview of how often this happens for every dataset in Figure \ref{supfig:failedFits}.
+
+```{r FracFailedFits, fig.cap ="\\label{supfig:failedFits}Barplots of proportions of features for which the NB distribution failed to fit."}
+estTaxa = sapply(paramList, function(x){sum(!is.na(x$coef[1,]))})
+presentTaxa = sapply(phyList, ntaxa)
+nonTrimmedTaxa = sapply(phyList, function(phy){sum(colMeans(otu_table(phy)@.Data==0)<1)})
+dfTrim = data.frame(Dataset = tags, failFrac = 1-estTaxa/nonTrimmedTaxa, Origin = Origin)
+ggplot(aes(x = Dataset, y = failFrac, fill = Origin), data = dfTrim) + geom_bar(stat ="identity") + scale_y_continuous(limits = c(0,0.06), name = "Proportion of failed fits") + theme_bw() + theme(axis.text.x = element_text(angle = 90)) + xlab("")
+rm(dfTrim)
+```
+
+## Goodness-of-fit test results
+
+### Bootstrap p-values
+
+```{r obsTestStats}
+if(!file.exists("testResultsList.RData")){
+#Apply the smooth test and calculate test statistics
+testResultsList = mapply(phyList, vars, FUN = smoothTestPhylo)
+save(testResultsList, file ="testResultsList.RData")
+} else {load(file ="testResultsList.RData")}
+```
+
+For each feature, 1000 parametric bootstrap samples were generated. Bootstrap samples with only zeroes in at least one of the sample groups are discarded, since parameter estimation is impossible. Also bootstrap samples for which the negative binomial regression fit failed were discarded. The library sizes and other sample variables were taken from the real dataset. The Armpit and AGP datasets had so many failed bootstraps (likely because of the high dispersions), that these two datasets were omitted from the analysis at this point. As evident from Figure \ref{supfig:dispDistr}, many of their features have a dispersion too high for the bootstrap p-values to be reliable.
+
+```{r GenerateBootstrappedData, eval = FALSE}
+B = 1000
+filePath = "HPCbootstrap/testBootstrap"
+foo = mclapply(tags, mc.cores = 4 , mc.preschedule = FALSE, function(tag){
+  filPat = paste0(filePath, "/", tag)
+  dir.create(filPat)
+  #Generate bootstrapped datasets per feature.
+  genBoot = genBootStrap(paramList[[tag]], reps = reps, filePath = filPat)
+  assign("X", genBoot$X) # Also save the design matrix
+  save(X, file = file.path(filPat, "X.RData"))
+})
+foo3 = mclapply(tags, mc.cores = 4 , mc.preschedule = FALSE, function(tag){
+  #Create a folder to save the results
+  dir.create(paste0(filePath, "/", tag, "/results"))})
+  filPat = paste0(filePath, "/", tag)
+  dir.create(paste0(filPat, "/testResults"))
+  sapply(seq_len(reps), function(i){
+    if(!file.exists(paste0(filPat, "/testResults/testRes",i,".RData"))){
+  load(paste0(filPat, "/rep", i, "LibsPars.RData"))
+    load(file.path(filPat, "X.RData"))
+    #Obtain bootstrap test statistics
+  testBootRes = smoothTestMat(yBase, x = X)
+  save(testBootRes, file = paste0(filPat, "/testResults/testRes",i,".RData"))
+    }
+  })
+})
+```
+
+```{r collectTestResults}
+odTrusted = 0.1
+estTaxaTried = sapply(paramList, function(x){length(x$coef[1,])})
+#Omit the two datasets from the analysis
+trustID = !tags %in% c("American gut project", "Armpit")
+tagsTrusted = tags[trustID]
+rawNamesTrusted = rawNames[trustID]
+if(!file.exists(file ="testBootList.RData")){
+testBootList = lapply(rawNamesTrusted, loadTestStats)
+names(testBootList) = rawNamesTrusted
+#Now calculate the p-values
+pValsList = lapply(rawNamesTrusted, function(tag){
+  realRes = testResultsList[[which(tag==rawNames)]]["testStat",]
+  bootRes = testBootList[[tag]]
+  names(bootRes) = names(paramList[[tags[rawNames==tag]]]$theta)[as.integer(names(bootRes))]
+  pVals = sapply(names(bootRes), function(name){
+    mean(realRes[name] < bootRes[[name]], na.rm = TRUE) #bootstrap p-value
+  })
+  return(pVals)
+})
+pValsList = lapply(pValsList, function(x){x[!is.na(names(x))]})
+names(pValsList) = tagsTrusted
+pValsListTrusted = lapply(names(pValsList), function(x){pValsList[[x]][paramList[[x]]$theta > odTrusted]})
+names(pValsListTrusted) = tagsTrusted
+save(pValsList, pValsListTrusted, file ="testBootList.RData")
+} else {load(file ="testBootList.RData")}
+```
+
+```{r plotPhists, fig.cap = "Histograms of raw bootstrap p-values of features with dispersions below 10. \\label{supfig:subP}", fig.height = 8}
+par(mfrow = c(4,4)) 
+foo = lapply(names(pValsListTrusted), 
+             function(x){hist(pValsListTrusted[[x]], main = x, xlab ="p-values", 
+                              breaks = 20, cex.main = 0.9)})
+par(mfrow = c(1,1)) 
+```
+
+```{r BH}
+BHpVals = lapply(pValsListTrusted[c("Squirrels")], 
+                 function(x){p.adjust(x, method ="BH")}) #,"Cooling water"
+BHfracs = sapply(BHpVals, function(x){mean(x<0.1, na.rm  =TRUE)})
+```
+
+\clearpage
+
+### Proportions of features with lack of fit \label{sec:estProp}
+
+The estimated proportion of poorly fit features is shown in Figure \ref{supfig:poorFit}. The proportion of poorly fit features varies over the datasets, but the standard errors are usually small. Using all features instead of only those with $\phi < 10$ (see Figure \ref{supfig:allFeat}) has no real effect on the results. The _fdrtool_ package is well able to ignore the peak at the large p-values in its calculations.
+
+```{r estNonNullFraction, warning = FALSE, fig.cap = "Barplots of the estimated proportion of features poorly fit by the negative binomial distribution for features with dispersion below 10. Error bars represent standard errors.\\label{supfig:poorFit}", fig.width = 6}
+tagsTrusted = tagsTrusted[!tagsTrusted %in% c("Squirrels")]
+avStats = sapply(as.character(tagsTrusted), function(x){x= pValsListTrusted[[x]];sum(!is.na(x))})
+fdrListNB = lapply(as.character(tagsTrusted), function(x){
+  x= pValsListTrusted[[x]];
+fdrtool(x[!is.na(x)], statistic = "pvalue", plot = FALSE, verbose = FALSE)})
+names(fdrListNB) = tagsTrusted
+estPropsNB = sapply(fdrListNB, function(x){x$param})
+rownames(estPropsNB) = c("cutoff", "N.cens", "eta0", "eta0.SE")
+colnames(estPropsNB) = tagsTrusted
+dfProps = data.frame(t(estPropsNB)[as.character(tagsTrusted),], Dataset = factor(ordered = TRUE, gsub("(", "\n(",tagsTrusted, fixed = TRUE), levels = gsub("(", "\n(",tagsTrusted, fixed = TRUE)), Origin  = Origin[tags %in% tagsTrusted])
+propPlot = ggplot(data = dfProps, aes(x = Dataset, y = 1-eta0,ymax = 1-eta0+eta0.SE, ymin =1-eta0, fill = Origin)) +geom_bar(stat = "identity") +geom_errorbar(size = 0.3) + ylab("Proportion of poorly fit features") +theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, size = 10, vjust = 0.5)) + 
+  scale_fill_brewer(palette = "Accent", name = "Origin") + scale_y_continuous(limits = c(0,1)) +xlab("")
+print(propPlot) 
+```
+
+```{r pdfLack, include = FALSE}
+postscript("Paper/Figures/Fig3.eps", width = 5.75, height = 5.2)
+print(propPlot + theme(legend.position ="top", legend.direction = "horizontal"))
+dev.off() 
+```
+
+The Squirrels dataset does not yield sufficient p-values for the local false discovery approach. For this dataset we choose not to use the approach of \textcite{Strimmer2008} as described in Section \ref{subseq:estLackFit}. Instead we correct the p-values using the Benjamini-Hochberg correction \cite{Benjamini1995} and consider all features with an adjusted p-values smaller than 0.1 to have a significantly poor fit. Inevitably this entails a power loss (conservative method). This analysis yields a poorly fit proportion of $`r signif(BHfracs[["Squirrels"]], 3)`$ for the Squirrels dataset.
+
+```{r estNonNullFractionAll, warning = FALSE, fig.cap = "Barplots of the estimated proportion of features poorly fit by the negative binomial distribution, when using all features (also those with dispersion >10). Error bars represent standard errors. \\label{supfig:allFeat}", fig.width = 6}
+tagsTrusted = tagsTrusted[!tagsTrusted %in% c("Squirrels")]
+fdrListNB = lapply(as.character(tagsTrusted), function(x){x= pValsList[[x]];fdrtool(x[!is.na(x)], statistic = "pvalue", plot = FALSE, verbose = FALSE)})
+estPropsNB = sapply(fdrListNB, function(x){x$param})
+rownames(estPropsNB) = c("cutoff", "N.cens", "eta0", "eta0.SE")
+colnames(estPropsNB) = tagsTrusted
+dfProps = data.frame(t(estPropsNB)[as.character(tagsTrusted),], dataset = tagsTrusted, Origin  = Origin[tags %in% tagsTrusted], seqTech = seqTechs[tags %in% tagsTrusted])
+propPlotAll = ggplot(data = dfProps, aes(x = dataset, y = 1-eta0,ymax = 1-eta0+eta0.SE, ymin =1-eta0, fill = Origin)) +geom_bar(stat = "identity") +geom_errorbar() + ylab("Proportion of poorly fit features") + theme_bw() +
+  theme(axis.text.x = element_text(angle = 90)) +scale_colour_discrete(name = "Sequencing technology") + scale_fill_brewer(palette = "Accent") + xlab("") + scale_y_continuous(limits = c(0,1))
+#Very slight, non-directional differences
+propPlotAll
+```
+
+```{r pdfLackAll, include = FALSE}
+postscript("Paper/Figures/S1_Fig.eps", width = 5.75, height = 5.2)
+print(propPlotAll + theme(legend.position = "top", 
+                          legend.direction = "horizontal"))
+dev.off() 
+```
+
+The proportion of poorly fit features does not appear to depend on the number of samples or features of the dataset, although its standard error does decrease with the number of features (see Figure \ref{fig:ScatterProp}).
+
+```{r, fig.height = 5, fig.cap = "Scatterplots of number of features and number of samples of the datasets under study versus estimated non-null proportion and its standard erro.\\label{fig:ScatterProp}"}
+par(mfrow = c(2,2))
+plot(estTaxaTried[tagsTrusted], 1-estPropsNB["eta0",], xlab ="Number of features", ylab = "Proportion of poorly fit features")
+plot(estTaxaTried[tagsTrusted], estPropsNB["eta0.SE",], xlab ="Number of features", ylab = "Standard error")
+plot(sapply(phyList[tagsTrusted], nsamples), estPropsNB["eta0",], xlab ="Number of samples", ylab = "Proportion of poorly fit features")
+plot(sapply(phyList[tagsTrusted], nsamples), estPropsNB["eta0.SE",], xlab ="Number of samples",  ylab = "Standard error")
+par(mfrow = c(1,1))
+```
+
+\clearpage
+
+## Descriptive analysis of poorly fit features
+
+Descriptive exploration of the type of lack of fit is performed as follows. Estimated dispersion parameters, mean relative abundances and proportion of zero counts are plotted as a function of raw p-values and feature wise deviances \cite{Zwilling2013, McCullagh1989}. Additionally, sample-wise deviances are plotted versus library sizes.
+
+### P-values
+
+Estimated dispersions and mean relative abundances appear uncorrelated with the raw p-values (Figures \ref{fig:rawPdisp}-\ref{fig:rawPab}). In the microbiome datasets, features with many zero abundances tend to have larger raw p-values (see Figure \ref{fig:rawPzeroes}). Presumably, this is because for features with many zeroes, the power to reject a null hypothesis on its distribution is lower.
+
+```{r plotPDisp, fig.cap = "Density plots of raw p-values vs. estimated dispersions. \\label{fig:rawPdisp}", fig.height = 8}
+par(mfrow = c(4,4))
+foo = lapply(as.character(tagsTrusted), function(x){smoothScatter(nrpoints = 0,log10(pValsListTrusted[[x]]+1e-4), main = x, xlab ="log10 p-values", ylab = "log10 Dispersions", y = log10(1/paramList[[x]]$theta[names(pValsListTrusted[[x]])]), ylim = c(-7,3), cex.main = 0.9)})
+par(mfrow = c(1,1))
+```
+
+```{r plotPAb, fig.cap = "Density plots of raw p-values vs. logged estimated mean relative abundances. \\label{fig:rawPab}", fig.height = 8}
+par(mfrow = c(4,4))
+foo = lapply(as.character(tagsTrusted), function(x){tmp = pValsListTrusted[[x]][!is.na(pValsListTrusted[[x]])]; smoothScatter(nrpoints = 0, log10(tmp+1e-4), main = x, xlab ="log10 p-values", ylab = "Logged abundance", y = paramList[[x]]$coef[1,names(tmp)], cex.main = 0.9)})
+par(mfrow = c(1,1))
+```
+
+```{r plotPZer, fig.cap = "Density plots of raw p-values vs. zero frequencies. \\label{fig:rawPzeroes}", fig.height = 8}
+par(mfrow = c(4,4))
+foo = lapply(as.character(tagsTrusted), function(x){tmp = pValsListTrusted[[x]][!is.na(pValsListTrusted[[x]])]; smoothScatter(nrpoints = 0, log10(tmp+1e-4), main = x, xlab ="log10 p-values", ylab = "Zero frequency", y = colMeans(otu_table(phyList[[x]])@.Data==0)[names(tmp)], cex.main = 0.9)})
+par(mfrow = c(1,1))
+```
+
+\clearpage
+
+### Deviances
+
+The sample-wise deviances are larger in samples with high library sizes (see Figure \ref{fig:samDev}). Feature-wise deviances are larger in abundant features and in features with intermediate zero frequencies (see Figures \ref{fig:taxDevAb} and \ref{fig:taxDevZeroes})
+
+```{r PlotDeviancesLibs, warning = FALSE, fig.height = 8, fig.cap = "Density plots of average deviance per sample versus library sizes.\\label{fig:samDev}"}
+devMats = lapply(as.character(tagsTrusted), function(x){getDeviances(Y = otu_table(phyList[[x]])@.Data, params = paramList[[x]])})
+names(devMats) = as.character(tagsTrusted)
+par(mfrow = c(4,4))
+foo = lapply(as.character(tagsTrusted), function(x){smoothScatter(nrpoints = Inf, log10(paramList[[x]]$Libs), rowMeans(devMats[[x]], na.rm =TRUE), main = x, xlab = "Log10 library sizes", ylab = "Average deviance per sample", cex.main = 0.9)})
+par(mfrow = c(1,1))
+```
+
+```{r plotDevianceResAbs, warning = FALSE, fig.height = 8, fig.cap = "Density plots of average deviance per feature versus logged abundance. \\label{fig:taxDevAb}"}
+par(mfrow = c(4,4))
+foo = lapply(as.character(tagsTrusted), function(x){smoothScatter(nrpoints = Inf,log10(exp(paramList[[x]]$coef[1,])), colMeans(devMats[[x]], na.rm =TRUE), main = x, xlab = "Log10 abundances", ylab = "Deviances", cex.main = 0.9)})
+par(mfrow = c(1,1))
+```
+
+```{r plotDevianceResZer, warning = FALSE, fig.height = 8, fig.cap = "Density plots of average deviance per feature versus zero frequency. \\label{fig:taxDevZeroes}"}
+par(mfrow = c(4,4))
+foo = lapply(as.character(tagsTrusted), function(x){smoothScatter(nrpoints = Inf,colMeans(otu_table(phyList[[x]])@.Data==0)[colnames(devMats[[x]])], colMeans(devMats[[x]], na.rm =TRUE), main = x, xlab = "Zero frequency", ylab = "Deviances", log = "", cex.main = 0.9)})
+par(mfrow = c(1,1))
+```
+
+```{r plotDevianceResDisp, warning = FALSE, fig.height = 8, fig.cap = "\\label{fig:taxDevDisp}Density plots of average deviance per feature versus log10 dispersion."}
+par(mfrow = c(4,4))
+foo = lapply(as.character(tagsTrusted), function(x){smoothScatter(nrpoints = Inf,log10(1/paramList[[x]]$theta[colnames(devMats[[x]])]), colMeans(devMats[[x]], na.rm =TRUE), main = x, xlab = "log10 Dispersion", ylab = "Deviances", cex.main = 0.9)})
+par(mfrow = c(1,1))
+```
+
+\clearpage
+
+# Zero-inflation
+
+It has been suggested that inclusion of a zero-inflation parameter may improve the fit of the NB distribution \cite{VanDeWiel2013, Xu2015, Zhang2016, VandenBerge2018}. For that reason, we compare the regular NB model with the zero-inflated negative binomial (ZINB) model through a likelihood ratio test. Ideally, we would do this only for features that were found to be poorly fit by the NB. However, the aim was not to identify the poorly fit features, but to estimate their proportion among all features. Our approach does not sufficiently distinguish poorly fit features from well fit features. Hence, the test for zero-inflation was applied on _all_ features, and the proportion of significant ones was estimated as in section \ref{subseq:estLackFit}. For the RNA-Seq data, many features do not have zero counts at all, as evident from Table \ref{tab:noZeroes}. Evidently, no ZINB model can be fitted on data that do not contain zeroes. 
+
+As evident from Figure \ref{supfig:estPropZI}, there is clear zero-inflation with respect to the NB distribution in the armpit dataset and some in the HMP and Lakes datasets. Taking the number of failed fits of the ZINB into account, the proportion of features with significant zero inflation in the RNA-Seq datasets is tiny. We conclude that for the Lakes, HMP skin and HMP oral cavity datasets, zero-inflation may explain part of the lack of fit to the NB, but not all. Moreover, many datasets with lack of fit to the NB show no evidence of zero-inflation. Note also that a significant zero-inflation with respect to the NB distribution does not imply that the ZINB distribution provides an adequate fit for this feature.
+
+```{r realDataZI}
+if(!file.exists("ZIpVals.RData")){
+  dir.create("ZIresults")
+ZIpVals = mapply(rawNames, vars, FUN = function(tag, var){
+  fileName = paste0("ZIresults/ZIres", tag, ".RData" )
+  if(!file.exists(fileName)){
+  ZIres = ZItestPhylo(phyList[[tag]], var)
+  save(ZIres, file = fileName)
+  } else {load(fileName)}
+  return(ZIres)
+  })
+names(ZIpVals) = tags
+save(ZIpVals, file = "ZIpVals.RData")
+} else {load(file = "ZIpVals.RData")}
+```
+
+```{r realDataZIresults, fig.cap ="\\label{supfig:histsZI}Histograms of raw p-values of likelihood ratio test for zero-inflation."}
+par(mfrow = c(4,4), mar = c(2,2,2,2))
+foo = lapply(names(ZIpVals), function(x){hist(ZIpVals[[x]], main = x, xlab = "p-values", cex.main = 0.9)})
+par(mfrow = c(1,1))
+```
+
+```{r realDataZIpoorlyFitTaxa, fig.cap = "\\label{supfig:estPropZI}Estimated proportion of features with significant zero-inflation with respect to the NB distribution. Error bars represent standard errors. Note that these proportions only refer to the features for wich a ZINB model could be fitted and may overestimate the real proportion of zero-inflated features (see Table \\ref{tab:noZeroes})."}
+fdrListZINB = lapply(ZIpVals, function(x){fdrtool(x[!is.na(x)], statistic = "pvalue", plot = FALSE, verbose = FALSE)})
+estPropsZINB = sapply(fdrListZINB, function(x){x$param})
+rownames(estPropsZINB) = c("cutoff", "N.cens", "eta0", "eta0.SE")
+colnames(estPropsZINB) = names(ZIpVals)
+dfPropsZI = data.frame(t(estPropsZINB), 
+                       dataset =  factor(names(ZIpVals), 
+                                         levels = names(ZIpVals), 
+                                         ordered = TRUE), 
+                       Origin = Origin[tags %in%names(ZIpVals)])
+ziPlot = ggplot(data = dfPropsZI, 
+       aes(x = dataset, y = 1-eta0, ymax = 1-eta0+eta0.SE, 
+           ymin =1-eta0, fill = Origin)) + 
+  geom_bar(stat = "identity") + geom_errorbar() +
+  theme_bw() + ylab("Proportion of zero-inflated features") +
+  theme(axis.text.x = element_text(angle = 90), axis.title.y = element_text(size = 9)) + scale_fill_brewer(palette = "Accent") +xlab("")
+#Note that for RNA-Seq most fits failed
+ziPlot
+```
+
+```{r ziprint, include = FALSE}
+postscript("Paper/Figures/Fig4.eps", width = 5.75, height = 5.2)
+print(ziPlot)
+dev.off()
+```
+
+```{r ZIfits, fig.cap = "Proportions of features with no zero counts, total fraction of zeroes per dataset and proportions of zeroes with failed fits of the ZINB model. \\label{supfig:ZIfailed}", eval = FALSE}
+dfFits = data.frame("Total zero fraction" = sapply(phyList[names(ZIpVals)], function(x){mean(otu_table(x)==0)}), 
+"Features without any zeroes" = sapply(phyList[names(ZIpVals)], function(x){mean(colMeans(otu_table(x)==0)==0)}),
+  "Failed fits of ZINB" = sapply(ZIpVals, function(x){mean(is.na(x))}),
+"Dataset" = dfPropsZI$dataset) #RNA-Seq have very little zeroes, hence the failed fits. But then ZI is unlikely anyway. HMPvagina simply has so many zeroes that it won't fit either most often, but there are enough taxa left.
+dfFits2 = melt(dfFits, id.vars = "Dataset", variable.name = "Property", value.name = "Proportion")
+dfFits2$Origin  = Origin[dfFits2$Dataset]
+ggplot(data = dfFits2, aes(x = Dataset, y = Proportion, group = Property, fill = Property, colour = Origin)) + geom_bar(position = "dodge", stat = "identity", size = 0.75) + theme_bw() + xlab("") +theme(axis.text.x = element_text(angle = 90)) + scale_colour_discrete(name = "Origin")
+```
+
+\clearpage
+
+```{r zeroTab, result = "asis", eval  = FALSE}
+zeroFracs = sapply(phyList[names(ZIpVals)], function(x){mean(colMeans(otu_table(x)==0)==0)})
+xtab = xtable(data.frame(Dataset = tags, "Proportion of features\n without zeroes" = zeroFracs), caption = "Table of proportions of features without zero observations in all datasets under study. \\label{tab:noZeroes}")
+print(xtab, include.rownames = FALSE)
+```
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lr}
+  \hline
+Dataset & Proportion of features without zeroes \\ 
+  \hline
+American gut project & 0.00 \\ 
+  HMPskin & 0.00 \\ 
+  HMPvagina & 0.00 \\ 
+  HMPoralCavity & 0.00 \\ 
+  Colorectal cancer (Zeller) & 0.00 \\ 
+  Armpit & 0.00 \\ 
+  Crohn's disease & 0.06 \\ 
+  Colorectal cancer (Kostic) & 0.00 \\ 
+  Humanized Mice & 0.00 \\ 
+  Squirrels & 0.00 \\ 
+  Cooling water & 0.00 \\ 
+  Lakes & 0.00 \\ 
+  Keyboard & 0.00 \\ 
+  Neuroblastoma (cell line) & 0.81 \\ 
+  Human brain & 0.76 \\ 
+  Neuroblastoma (human) & 0.54 \\ 
+   \hline
+\end{tabular}
+\caption{Proportions of features without zero observations in all datasets under study. \label{tab:noZeroes}} 
+\end{table}
+
+```{r boxplotLibs, eval = FALSE, fig.cap ="Boxplots of library size distributions for all datasets under study.\\label{supfig:boxPlotLibs}"}
+libSizes = lapply(phyList[as.character(tagsTrusted)], sample_sums)
+moltLibs = melt(libSizes)
+names(moltLibs) = c("Value","Dataset")
+libDF = data.frame(Value = moltLibs$Value, Dataset = factor(ordered = TRUE, gsub("(", "\n(",moltLibs$Dataset, fixed = TRUE), levels = gsub("(", "\n(",tagsTrusted, fixed = TRUE)), Origin  = Origin[moltLibs$Dataset])
+ggplot(data = libDF, aes(x = Dataset, fill = Origin, y = Value)) + geom_boxplot() +scale_y_continuous(trans = "log") + theme_bw() + ylab("Library sizes") +
+  theme(axis.text.x = element_text(angle = 90))  + scale_fill_brewer(palette = "Accent")
+```
+
+```{r libsVSZIandLackofFit, eval = FALSE, fig.cap ="Propotion of features poorly fit to the NB distribution (black circles) and proportion of features with zero inflation per dataset versus average sequence count per feature. No clear link between lack of fit or zero inflation and sequencing depth could be established. \\label{supfig:boxPlotLibs}"}
+seqDepthPerFeature = lapply(phyList[as.character(tagsTrusted)], function(x){sample_sums(x)/nsamples(x)})
+moltSeq = melt(seqDepthPerFeature)
+names(moltSeq) = c("Value","Dataset")
+seqDF = data.frame(Value = moltSeq$Value, Dataset = factor(ordered = TRUE, gsub("(", "\n(",moltSeq$Dataset, fixed = TRUE), levels = gsub("(", "\n(",tagsTrusted, fixed = TRUE)), Origin  = Origin[moltSeq$Dataset])
+ggplot(data = seqDF, aes(x = Dataset, fill = Origin, y = Value)) + geom_boxplot() + scale_y_continuous(trans = "log") + theme_bw() + ylab("Average sequence counts per feature") +
+  theme(axis.text.x = element_text(angle = 90))  + scale_fill_brewer(palette = "Accent")
+meanSeqDepth = sapply(seqDepthPerFeature, mean)
+plot(meanSeqDepth, 1-estPropsNB["eta0",], log = "x", ylab = "Proportion of features", xlab ="Average sequence count per feature", ylim = c(0,1))
+#ZI
+points(meanSeqDepth, 1-estPropsZINB["eta0",names(seqDepthPerFeature)], col = "red", pch = 2)
+# No relationship between library sizes and lack of fit or zero-inflation
+axis(side = 3, at = meanSeqDepth, labels = names(meanSeqDepth), las = 2, padj = c(rep(0.2,4),0,0.4,0,0.4,0.2,0.2,-0.5,0.5), cex.axis = 0.65)
+legend("top", legend = c("Proportion of poorly fit features","Proportion of zero-inflated features"), col = c("black","red"), pch =c(1,2))
+```
+
+# Consequences of lack of fit for statistical testing
+
+From the results above it is clear that many features in sequence count data do not follow the NB distribution. It has been shown before that the performance of statistical tests relying on the NB distribution deteriorates when applied to real data rather than to synthetic data generated under the NB distribution \cite{Hawinkel2017, Assefa2018, Benidt2015, Reeb2013}. Here we demonstrate the adverse effects of the lack of fit discovered through the smooth tests on statistical tests for differential abundance/expression.
+
+Based on the bootstrap p-values of the smooth test, q-values are obtained from the procedure by \textcite{Strimmer2008}. All features with q-values smaller than 10\% are grouped together and considered to be "poorly fit features", as opposed to the rest of the features which are considered to be well fit by the NB distribution.
+
+For all datasets shown in Figure \ref{supfig:poorFit}, the following simulation procedure is followed. Samples are randomly allocated to one of two groups with equal probability (similar to the "real data shuffling" in \textcite{Hawinkel2017}). Next, a negative binomial regression is fitted through maximum likelihood to every feature of the real dataset with the library sizes as offset and the grouping variable from Section \ref{datasets} and the random grouping variable as regressors. Wald test p-values for the random grouping variable are calculated for every feature. As the regressor that is tested for is independent of the data, the resulting p-values are expected to come from a uniform distribution on [0,1]. This procedure is repeated 50 times for each dataset. For both the "poorly fit" and the "well fit" groups of features, the proportion of p-values smaller than 10\% is calculated. The HMP oral cavity dataset was omitted from this dataset, as all features had q-values below 0.1.
+
+The resulting proportions are shown in Figure \ref{supfig:sim}. For every dataset, the proportion of p-values smaller than 0.1 is larger for the poorly fit features than for features for which no lack of fit to the NB was detected. In most cases it is also larger than 0.1 (especially for datasets with large dispersions), indicating a liberal method. This demonstrates how the lack of fit to the NB distribution in real datasets has a negative impact on the performance of tests assuming the NB distribution, by inflating the type I error rate.
+
+Also the features that were categorized as "well fit" by the NB distribution have more small p-values than expected under uniformity for some datasets. This may be caused by the slow convergence of the parameter estimators of NB distribution to their asymptotic distributions \cite{Rigaill2016, Hawinkel2017}.
+
+```{r consequences}
+trustID = !tags %in% c("American gut project", "Armpit", "HMPoralCavity", "Squirrels")
+tagsTrusted = tags[trustID]
+rawNamesTrusted = rawNames[trustID]
+nReps = 10L
+id = seq_along(phyList)[tags %in% tagsTrusted]#[-3]
+shuffleResList = lapply(id, function(i){
+  fileName = paste0("shuffleRes/", rawNames[i], "shuffleRes.RData" )
+  if(!file.exists(fileName)){
+    dir.create(paste0("shuffleRes/", rawNames[i]))
+  shuffleRes = shuffleTest(phyList[[i]], vars[i], nRep = nReps, nCores = 2, tag = rawNames[i])
+  save(shuffleRes, file = fileName)
+  } else {load(fileName)}
+  shuffleRes
+})
+```
+
+```{r qqplots}
+fdrNom = 0.1 #The nominal fdr
+idList = lapply(fdrListNB, function(x){
+  names(x$qval)[x$qval < fdrNom]
+})
+moltShuffle = melt(shuffleResList)
+names(moltShuffle) = c("feature", "method", "pvalue", "replicate", "Dataset")
+moltShuffle$Dataset = factor(moltShuffle$Dataset, levels = seq_along(id), labels = tags[id])
+moltShuffle$Id = seq_len(nrow(moltShuffle))
+moltShuffle$method  = factor(moltShuffle$method, levels = c("nbML", "edgeR", "DESeq2", "Prentice"), 
+                             labels = c("Negative binomial", "edgeR", "DESeq2", "Prentice rank sum test"),
+                             ordered = TRUE)
+moltShuffle$Fit = factor(moltShuffle$feature %in% unlist(idList), 
+                         levels = c(TRUE, FALSE), labels = c("Poorly fit", "Well fit"))
+nKeep = 1000L
+idSampled = unlist(aggregate(formula = as.formula(Id ~ Fit + Dataset + method + replicate), 
+                      data = moltShuffle, FUN = function(x, nKeep) {
+                        sample(x, min(length(x), nKeep))}, nKeep = nKeep)$Id)
+moltShuffle2  = moltShuffle[ moltShuffle$Id %in% idSampled,]
+ggplot(data = moltShuffle2, aes_string(sample = "pvalue", group = "Fit", colour ="Fit")) +
+  geom_qq(distribution = qunif, size = 0.2) + 
+  facet_grid(reformulate("method", "Dataset")) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", size = 0.25) +
+  theme_bw() + xlab("Theoretical quantiles") + ylab("Observed quantiles") +
+  theme(strip.text = element_text(size = 6), axis.text.x = element_text(angle = 90))
+ggsave("Paper/Figures/S2_Fig.eps", units = "cm", height = 34, width = 16)
+```
+
+```{r ggPlotSim, fig.cap = "\\label{supfig:sim}Boxplots of proportions of p-values smaller than 0.1 for features with poor and good fit to the NB distribution, per dataset."}
+specBar = 0.1 #The p-value cut off
+names(idList) = tags[id]
+fdrPerGroup = lapply(id, function(i){
+  fileName = paste0("shuffleRes/", rawNames[i], "shuffleRes.RData")
+  if(file.exists(fileName)){
+  load(fileName)
+  idTmp = idList[[as.character(tags[i])]]
+  specs = lapply(shuffleRes, function(shu){
+    commonNames = intersect(rownames(shu), idTmp)
+    specDA = colMeans(shu[commonNames,] < specBar, na.rm = TRUE)
+    specNDA = colMeans(shu[!rownames(shu) %in% commonNames,] < specBar, na.rm = TRUE)
+    cbind(poorlyFit = specDA, wellFit = specNDA)
+  })
+  }
+})
+names(fdrPerGroup) = tagsTrusted
+#fdrPerGroupComplete = Filter(fdrPerGroup[names(fdrPerGroup)!="HMPoralCavity"], f = is.matrix)
+##ggplot
+fdrPerGroupMolt = melt(fdrPerGroup)
+names(fdrPerGroupMolt) = c("Method", "Features", "value", "Repeat", "Dataset")
+fdrPerGroupMolt$Dataset = factor(fdrPerGroupMolt$Dataset, levels = tags, labels = tags, ordered = TRUE)
+fdrPerGroupMolt$Features = factor(fdrPerGroupMolt$Features, levels = c("poorlyFit", "wellFit"), labels = c("Poorly fit", "Well fit"), ordered = TRUE)
+fdrPerGroupMolt$Method  = factor(fdrPerGroupMolt$Method, levels = c("nbML", "edgeR", "DESeq2", "Prentice"), 
+                             labels = c("Negative binomial", "edgeR", "DESeq2", "Prentice rank sum test"),
+                             ordered = TRUE)
+fdrPerGroupMolt$Origin = Origin[fdrPerGroupMolt$Dataset]
+ggplot(data = fdrPerGroupMolt, aes_string(x = 'Dataset', y = "value")) + 
+  geom_boxplot(aes_string(fill = 'Features'), size = 0.3) + 
+  facet_grid(cols = vars(Method)) +
+  theme_bw() + ylab("Proportion of p-values < 0.1") + xlab("") +
+  theme(axis.text.x = element_text(angle = 90, size = 7, vjust = 0.05), legend.position = "top") +
+  geom_hline(yintercept = specBar, col = "red", linetype ="dashed") +
+  scale_fill_manual(values = c("#F8766D", "#00BFC4")) +
+  scale_colour_brewer(palette = "Accent")
+ggsave("Paper/Figures/Fig5.eps", width = 20, height = 11, units ="cm")
+```
+
+# Constant dispersion assumption \label{sec:singleDisp}
+
+So far we have assumed a single dispersion parameter $\phi$ for each feature. This is a custom that comes from RNA-Seq, where datasets often contain very few samples ($n$ as low as 2 or 3). In this case estimating dispersion is a huge challenge, and assuming a single variance a bare necessity \cite{Robinson2007}. However, in microbiome and more recent RNA-Seq datasets, the sample sizes are larger, and such that one could e.g. allow for different dispersions in the different treatment groups. We test this assumption by fitting this type of model, and testing for significance of multiple dispersions using a likelihood ratio test. The proportion of features with significant multiple dispersion, estimated as in section \ref{subseq:estLackFit}, is shown in Figure \ref{supfig:barConst}.
+
+```{r estDifferentDispersions}
+if(!file.exists("altParamList.RData")){
+altParamList = mcmapply(mc.cores = 1, phyList, vars, FUN = function(physeq, var){
+  estDiffThetasPhylo(physeq, var, convFactor = TRUE) #Estimate models with multiple dispersions.
+})
+names(altParamList) = tags
+altParamList = Filter(f = function(x){!is.null(x)}, lapply(tags, function(x){
+  y  = altParamList[[x]]
+  betas = sapply(y, function(zz){zz$betas})
+  thetas = sapply(y, function(zz){zz$thetas})
+  if(is.list(thetas)){
+  betas = betas[,!sapply(thetas, anyNA)]
+  thetas = sapply(thetas[!sapply(thetas, anyNA)], identity)
+  }
+  X = model.matrix( ~x, data.frame(x=get_variable(phyList[[x]], vars[[which(x==tags)]]), row.names = sample_names(phyList[[x]])))
+  Libs = sample_sums(phyList[[x]])[rownames(X)]
+  list(coef = betas, theta = thetas, X = X, Libs = Libs)
+}))
+names(altParamList) = tags
+save(altParamList, file ="altParamList.RData")
+} else {load(file ="altParamList.RData")}
+```
+
+```{r lrt, fig.cap ="Histograms of raw p-values when testing the single dispersion assumption. \\label{supfig:histDiffDisp}", fig.height = 8}
+if(!file.exists("pValsLRT.RData")){
+pValsLRT = mcmapply(mc.cores = 1, as.character(tags), vars, FUN = function(tag, var){
+  df = nlevels(factor(get_variable(phyList[[tag]], var)))-1
+  tmp = getLogLiksParams(paramList[[tag]], altParamList[[tag]], phyList[[tag]], var)
+  LRT(tmp, df) #Perform the likelihood ratio test
+})
+names(pValsLRT) = tags
+save(pValsLRT, file = "pValsLRT.RData")
+} else {load("pValsLRT.RData")}
+par(mfrow = c(4,4), mar = c(3,3,3,3))
+foo = lapply(names(pValsLRT), function(n){hist(pValsLRT[[n]], main = n, breaks = 20, xlab ="Raw p-values", cex.main = 0.9)})
+par(mfrow = c(1,1))
+```
+
+```{r estFraction, warning = FALSE}
+fdrList = lapply(pValsLRT, function(x){fdrtool(x[!is.na(x)], statistic = "pvalue", plot = FALSE, verbose = FALSE)})
+estProps = sapply(fdrList, function(x){x$param})
+rownames(estProps) = c("cutoff", "N.cens", "eta0", "eta0.SE")
+colnames(estProps) = names(pValsLRT) 
+```
+
+```{r, fig.height = 6, fig.width = 8, fig.cap = "Barplots of proportion of features for which group-wise dispersion parameters significantly improve the fit. Error bars indicate standard errors.\\label{supfig:barConst}"}
+dfDisp = data.frame(t(estProps[c("eta0", "eta0.SE"),-10]), Dataset = tags[-10], Origin  = Origin[-10])
+ggplot(data = dfDisp, aes(x = Dataset, y = 1-eta0, ymax = 1-eta0+eta0.SE, ymin =1-eta0, fill = Origin)) +geom_bar(stat = "identity") + geom_errorbar() + theme_bw() + ylab("Proportion of features with >1 dispersion parameters") +theme(axis.text = element_text(angle  = 90)) + scale_fill_brewer(palette = "Accent") + xlab("")
+```
+
+The results of the squirrels dataset are unreliable because of the small number of features. We conclude that for most datasets, for approximately 25% of the features it would improve their fit to the NB distribution if they had a separate dispersion parameter. The Crohn's disease and HMP oral cavity datasets are clear exceptions, where more than 50% of the features have significant group-wise dispersions. Note that these results still do not mean that the NB with group-wise dispersion parameters would provide an adequate fit to the data. It only shows that, for some features, the NB with multiple dispersion parameters improves the fit with respect to the NB with a single dispersion parameter per feature.
+
+\clearpage
+
+\printbibliography

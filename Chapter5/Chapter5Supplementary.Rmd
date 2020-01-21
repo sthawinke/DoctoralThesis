@@ -1,0 +1,1617 @@
+---
+title: "Model-based joint visualization of multiple compositional omics datasets"
+author: "Stijn Hawinkel, Luc Bijnens, Kim-Anh Lê Cao and Olivier Thas"
+output:
+  pdf_document:
+    includes:
+      in_header: packagesDI.sty
+    keep_tex: yes
+    number_sections: yes
+subtitle: Supplementary material
+bibliography: norm.bib
+---
+
+\beginsupplement{0}
+
+This document provides supplementary information to the article "Model-based joint visualization of multiple compositional omics datasets".
+
+\tableofcontents
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, fig.width = 6, fig.height = 4.5, 
+                      warning = FALSE, eval = TRUE, fig.width = 11, 
+                      cache = TRUE, message = FALSE)
+libs = c("phyloseq", "ggplot2", "parallel", "reshape2", "numDeriv", "r.jive", 
+         "microbenchmark", "profvis", "Matrix", "parallel", "combi", 
+         "RCM", "MOFA", "PMA", "mixOmics", "Biobase", "RColorBrewer")
+for (i in libs){
+  suppressPackageStartupMessages(library(i, character.only = TRUE))
+};rm(i, libs)
+for(i in list.files("auxFun", full.names = TRUE)){source(i)};rm(i)
+nCores = 4
+Theme = theme(axis.text = element_text(size = 12), 
+              legend.text = element_text(size = 13), 
+              legend.title = element_text(size = 14), 
+              axis.title = element_text(size = 14), 
+              strip.text = element_text(size = 14))
+paramSimFolder = "results/paramSim" #Parametric simulation folder
+nonparamSimFolder = "results/nonParamSim" #Nonparametric simualtion folder
+permSimFolder = "results/Perm" #Mock groups simualtion folder
+realDataFolder = "results/realData" #Real data results
+methodsLevels = c("pca", "pcaFitClr", "correspFit", "ccaUnshrunk", 
+                  "ccaUnshrunkClr","ccaShrunk", "pls", "plsClr", "jive",
+                  "mofaFit", "compInt", "reference")
+methodsLabels = c("PCA", "PCA-clr", "Correspondence\nanalysis", "CCA", 
+                  "CCA-clr", "sCCA", "PLS", "PLS-clr", "JIVE", "MOFA", 
+                  "combi", "Reference")
+methodsColors = c("blue", "lightblue", "orange", "green", "darkgreen", 
+                  "lightgreen", "purple", "violet", "black", "brown", 
+                  "red", "grey75" )
+```
+
+```{r load data}
+load("data/HMP2.RData")
+load("data/ZhangData.RData")
+load("data/Gavin.RData")
+rm(hmp2metabo, hmp2HTX)
+```
+
+```{r prepareFolders, eval = FALSE}
+dir.create("syntData") #Synthetic data
+dir.create("results") #Simulation and real data results
+dir.create(paramSimFolder)
+dir.create(nonparamSimFolder)
+dir.create(permSimFolder)
+dir.create(realDataFolder)
+```
+
+# The data integration model
+
+## Model specification
+
+We specify the following statistical model:
+
+\begin{equation}
+\begin{aligned}
+g_x(E(\mathbf{X}|\mathbf{Z})) = \mathbf{U}_x + \mathbf{Z}\boldsymbol{\gamma}\\
+g_y(E(\mathbf{Y}|\mathbf{Z})) = \mathbf{U}_y + \mathbf{Z}\boldsymbol{\beta}
+\label{supeq:modelSpec}
+\end{aligned}
+\end{equation}
+
+whereby g$_x$ and g$_y$ are appropriate link functions. $\mathbf{U}_x$ and $\mathbf{U}_y$ are offset matrices correcting for differences in baseline expression/abundance and sequencing depth defining the "independence model" (see next section). __Z__ (n$\times$M) is a low dimensional matrix of latent variables (M = 2 or 3) \cite{Argelaguet2018}. $\boldsymbol{\gamma}$ (M$\times$p) and $\boldsymbol{\beta}$ (M$\times$q) are view-wise coefficient matrices.
+
+Note that model \eqref{supeq:modelSpec} is not a matrix decomposition of __X__  and __Y__. Instead it can be regarded as a low dimensional approximation of the expectation matrices of the saturated models E(__X__)=__X__ and E(__Y__)=__Y__, without calculating the entire decomposition.
+
+### Independence model
+
+The first step of the fitting procedure is to estimate the independence models, i.e. the models describing homogeneous sample composition. The independence models defining the offset matrix are of the form
+
+\begin{equation}
+\begin{aligned}
+g_x(E_{indep}(\mathbf{X})) = \mathbf{U}_x = \mathbf{d}_x\mathbf{e}_x^t\\
+g_y(E_{indep}(\mathbf{Y})) = \mathbf{U}_y = \mathbf{d}_y\mathbf{e}_y^t
+\label{supeq:indepModels}
+\end{aligned}
+\end{equation}
+
+Whereby $\mathbf{d}_x$ en $\mathbf{d}_y$ are vectors of length _n_ that quantify total sample abundance/expression, e.g. sequencing depth or array intensity. $\mathbf{e}_x$ and $\mathbf{e}_y$ are vectors of length _p_ and _q_ that quantify baseline feature means. They correct for baseline differences; independence models are _marginal_ models. For compositional data, the restriction $\sum_{j=1}^p g_x^{-1}(e_j) = 1$ is imposed.
+
+### Conditioning on baseline covariates
+
+A next, optional step is to condition on known confounding variables such as batch or research center. Although simple in our regression framework, it is an important advantage over decomposition based methods. The confounding variables need not be identical for all views. We call the two sets of (potentially overlapping) confounding variables __R__ and __S__, then the mean models can be extended such that:
+
+\begin{equation}
+\begin{aligned}
+g_x(E(\mathbf{X}|\mathbf{R})) = \mathbf{U}_x + \mathbf{R}\boldsymbol{\eta}\\
+g_y(E(\mathbf{Y}|\mathbf{S})) = \mathbf{U}_y + \mathbf{S}\boldsymbol{\beta}
+\label{supeq:cond}
+\end{aligned}
+\end{equation}
+
+In case of compositional data, one restriction is needed to guarantee a solution. In this case we use the additive log-ratio (alr) transform \cite{Billheimer2001} as link function, which is defined as:
+
+\begin{equation}
+alr(\mb x) = \log\Big(1, \frac{x_2}{x_1}, \frac{x_3}{x_1}, \frac{x_4}{x_1}, ..., \frac{x_p}{x_1} \Big).
+\label{supeq:alr}
+\end{equation}
+
+This effectively sets the parameter of the first feature of a view to zero for all confounders ($\boldsymbol{\eta}_{.1} = \mathbf{0}$).
+
+Another problem occurs for discrete confounders with features that only have zero observations in one of the groups defined by these confounders. One could filter out all these features, but this leads to significant data loss. An alternative solution is offered by bias-reduced estimates \cite{Firth1993, Kosmidis2009, Lund2012}. Instead of correcting the bias of the maximum likelihood estimates (which are infinite under the scenario above), they reduce the bias by directly modifying the estimating equations. This allows for the estimation of the confounder parameters under this scenario. If the (quasi)-score equation for a mean parameter $\eta$ is given by $\mathbf{s}_{\eta}$, then the bias-reduced (quasi)-score equation is of the form
+
+$$\mathbf{s}_{\eta} + \mathbf{A}_{\eta} = \mathbf{0}$$
+
+with $\mathbf{A}_{\beta} = R^t\mb{\xi}$. Hereby $\xi_i = \frac{h_i}{(2f_i)} f_i'$ with $h_i$ the diagonal elements of the _hat matrix_ $\mathbf{R}(\mathbf{R}^t\mathbf{R})^{-1}\mathbf{R}^t$ and $f_i = \frac{d\mu_i}{dg_x(\mu_i)}$  and $f_i' = \frac{d^2\mu_i}{dg_x(\mu_i)^2}$. Hence $f_i = \big(\frac{d\log(\mu_i)}{d\mu_i}\big)^{-1} = \mu_i$ and $f_i' = \mu_i$ such that $\xi_i = \frac{-h_i}{2}$. In practice, these systems of estimating equations are still very hard to solve though, because of the near singularity of the Jacobian matrices.
+
+### Restrictions \label{supsec:restrictions}
+
+Model \eqref{supeq:modelSpec} is overspecified, as both the latent variables and coefficients are unknown and need to be estimated from the data. Hence restrictions need to be applied to guarantee an identifiable model. The columns of __Z__ are restricted to be orthogonal: $\mathbf{Z}^T\mathbf{Z}$ = $\text{diag}(\boldsymbol{\psi})$ with _diag()_ defining a diagonal matrix with the vector $\boldsymbol{\psi}$ with non-negative entries on the diagonal. The coefficient matrices are restricted to be orthonormal: $\boldsymbol{\gamma}\boldsymbol{\Omega}_x\boldsymbol{\gamma}^T$ = $\boldsymbol{\beta}\boldsymbol{\Omega}_y\boldsymbol{\beta}^T$ = I$_M$, with $\boldsymbol{\Omega}_x$ and $\boldsymbol{\Omega}_y$ view specific, diagonal weight matrices and I$_M$ the identity matrix of dimension M.
+
+The choice of weights follows \textcite{Hawinkel2019}: all samples are considered equally likely to be drawn from the population and receive equal weights in the restrictions. For the features, more abundant features are considered to be more likely to be drawn from the population and receive weights (on the diagonal of $\boldsymbol{\Omega}$) proportional to their abundance under the independence model $g^{-1}(\mathbf{e})$.
+
+Note that because the model is overspecified, classical inference based on (quasi-)likelihood does not hold. No confidence intervals or p-values can be calculated. The model is intended for data exploration only and relies solely on the point estimates.
+
+__Technical note__: Centering and orthogonalization restrictions are directly imposed in the optimization procedure through Lagrange multipliers. This is crucial to avoid overflow, i.e. certain numbers becoming to large for the computer to store. Normalization restrictions can be imposed _post hoc_. This does not cause numerical problems, and the iterative algorithm will not stop until they are fulfilled. This approach is faster, as the initial optimization problem is simpler. Even if the estimating equations were not solved in some iteration, afterwards the centering and orthogonalization will be still be enforced through Gram-Schmidt orthogonalization to speed up convergence. Finally, some restriction is needed to render the estimation under compositionality with central log-ratio transform feasible, but the centering restrictions already conveniently fulfill this role.
+
+## Model estimation
+
+In summary, the fitting algorithm consists of the following steps
+
+1. Estimate the view-wise independence models by iterating between the estimation of the row and column offsets and possible nuisance parameters.
+2. (Optional) Estimate feature parameters for confounding variables, and condition on them by including their contribution to the mean matrix in the offset. This step also occurs independently for each view.
+3. Iterate between estimating the latent variables, feature parameters and possible nuisance parameters. When convergence for one dimension is achieved, incorporate this dimension in the offset, and estimate the next dimension conditional on all previous ones.
+
+The iterative procedures in steps 1 and 3 continue until convergence. Convergence  is declared when the square root of the L$_2$ norm of the all estimates drops below a certain tolerance (here 1e-4), e.g. for the latent variables:
+
+$$\sqrt{\Big(\frac{\mathbf{z}_{.m}^{old} - \mathbf{z}_{.m}^{new}}{\mathbf{z}_{.m}^{old}}\Big)^t\Big(\frac{\mathbf{z}_{.m}^{old} - \mathbf{z}_{.m}^{new}}{\mathbf{z}_{.m}^{old}}\Big)} < 10^{-4}, $$
+
+with $\mathbf{z}_{.m}^{new}$ the current estimates and $\mathbf{z}_{.m}^{old}$ the estimates of the previous iteration. 
+
+### Starting values
+
+Iterative algorithms converge much faster when provided with reasonable starting values. For the independence model, simple row and column sums can be used. Starting values for latent variables and feature coefficients can be obtained from following singular value decompositions. With offset matrices $g_x^{-1}(\mathbf{U}_x)$ and $g_y^{-1}(\mathbf{U}_y)$, obtain standardized residual matrices $\frac{\mathbf{X}- g_x^{-1}(\mathbf{U}_x)}{\mathbf{s}v_{indep}(\clr^{-1}(\mathbf{e}^t))}$ (for sequence count data) or $\frac{\mathbf{Y}- g_y^{-1}(\mathbf{U}_y)}{\text{diag}(\mb{\sigma}_{indep})}$ (for microarray data). $\mb{\sigma}_{indep}$ are the column wise standard deviations under the independence model); see Section \ref{sec:abVarTrend} for the denominator of the sequence count case. These residual matrices are concatenated by row into one large matrix __D__, for which the singular value decomposition is then obtained:
+
+$$\mathbf{D} = \mathbf{G} \boldsymbol{\Sigma} \mathbf{H}^t$$
+
+The first $M$ columns of $\mathbf{G}\boldsymbol{\Sigma}$ are then used as starting values for __Z__, and the first $M$ columns of __H__  as starting values for the corresponding feature parameters. For a constrained analysis, redundancy analysis \cite{vandenWollenberg1977} on the matrix __D__ and the design matrix of baseline sample variables __c__ is used to obtain starting values for the environmental gradient and feature parameters.
+
+### Solving estimating equations for compositional data
+
+The Newton-Raphson algorithm that is used to solve the estimating equations may encounter local extrema and saddle points when applied to compositional data. Therefore, if the Newton-Raphson algorithm does not converge when the old parameter estimates are used as stating values, random standard normal variates are repeatedly used as starting values instead until the estimation equations are solved. This is a brute-force solution but it works in most cases. This kind of problems in high dimensional estimation problems are very intractable, more theoretical research is needed into a more general solution in the compositional framework.
+
+### The abundance-variance trend \label{sec:abVarTrend}
+
+The abundance-variance trend models the relationship between $\log(\pi_j)$ and $\log\Big(\overline{\text{Var}(X_j|\mathbf{Z}_{.1,m})}\Big) = \log\Big(\frac{1}{n-1}\sum_{i=1}^n\frac{(X_{ij} - E(X_{ij}|\mathbf{Z}_{.1,m}))^2}{s_i}\Big)$ through a smooth function $a_m$. The fit is performed on the log-scale since this spreads the observations nicely and avoids undue influence of extreme values. It allows to predict $\text{Var}(X_{ij}|\pi_j, s_i)$ as $v_m(\pi_j)s_i = \exp\big(a_m[\log(\pi_j)]\big)s_i$. This approach shares information between features to reliably estimate variances. The smooth function $a_m$ is updated throughout the iterative procedure and is unique to every dimension. Note that this approach may imply that for some observations $X_{ij}$ and $X_{i'j'}$, $\exp\big(a_m(\log(\pi_j))\big)s_i \neq \exp\big(a_m(\log(\pi_{j'}))\big)s_{i'}$ even though $E(X_{ij}|\mathbf{Z}_{.1,m}) = E(X_{i'j'}|\mathbf{Z}_{.1,m})$.
+
+\textcite{Anders2010} use a local regression as a smooth function, but this may yield a smoother with a irregular derivatives. This destabilizes the Newton-Raphson algorithm used to solve the estimating equations. Instead we use a natural smoothing spline, which has continuous first and second order derivatives. At the cost of being slightly more rigid, it yields a much more stable algorithm.
+
+Great care should be taken when extrapolating this abundance-variance trend to small relative abundances. This will be necessary as the modelling processes may yield small relative abundances for some features. It is known that for small means, sequence count data approximately follow the Poisson distribution \cite{Robinson2007, Marioni2008}. The Poisson distribution has a variance that is equal to the mean. Hence, as a heuristic, for small abundances it is assumed that $\text{Var}(X_{ij}|\pi_j, s_i)= \pi_js_i$. The smooth function is then constrained to have slope 1 and equal the diagonal line for some value between $(\min_{\bs{\pi}} \{\log(\pi_j)\}-1)$ and  $\log\Big[\left(\sum_{i=1}^n\sum_{j=1}^pE(X_{ij}|\mathbf{Z}_{.1,m})\right)^{-1}\Big] - 10$. This value is selected as the one that minimizes the squared error $$\sum_{j=1}^p \Big(\text{Var}(X_{ij}|\pi_j, s_i) - \exp(a(\log(\pi_j)))s_i\Big)^2.$$ This complicated solution is motivated by the need to keep the derivatives continuous for numerical stability.
+
+```{r abVarTrend, include = FALSE}
+pdf("Manuscript/Figures/abVarTrend.pdf", height = 5)
+foo = lapply(extractData(list(hmp2phylo)), checkMeanVarTrend, cex.lab = 1.5, 
+             cex.axis = 1.25)
+dev.off()
+pdf("/home/stijn/PhD/Thesis/Figures/06d_integrate/abVarTrend.pdf", height = 4)
+par(mar = c(4.5,5,1,3))
+foo = lapply(extractData(list(hmp2phylo)), checkMeanVarTrend, cex.lab = 1.25, 
+             cex.axis = 1.1)
+dev.off()
+```
+
+### Microarray data
+
+For modelling microarray data, we mainly follow the tracks of the popular $limma$ package \cite{Ritchie2015}. The array data is log-transformed, and then modelled using a simple linear model with identity link. The estimates of the feature-wise variances are shrunken towards a common value using an empirical Bayes procedure \cite{Smyth2004}. The estimating equations are then:
+
+$$\sum_{i=1}^n Z_i \frac{Y_{ij}-\mu_{ij}}{\sigma^2_{j,EB}}$$
+
+with __Y__ the microarray data matrix. $\sigma^2_{j,EB}$ is the empirical Bayes estimate of the variance for feature $j$.
+
+### Latent variable estimation
+
+The estimating equations for the latent variables are obtained by summing the estimating equations of all different views for every sample. If desired, different weights can be allotted to the different datasets in this way, but we use even weights by default. If all weight is allotted to a single dataset this reduces to a single view problem, as e.g. the _RCM_ package \cite{Hawinkel2019}.
+
+One reasoning is to inverse weigh the elements of the estimating equations for the latent variables by the number of features in the view. Otherwise views with many features might get a very strong impact on the estimation of the latent variables, without there being a biological rationale why they should contain more information. Another argument is to state that datasets with more features carry more information and can have more weight in the estimation. Finally, it may be that the dataset with the clearest signal will take preponderance. An answer to these questions is given in the next paragraph.
+
+### Convergence
+
+The model is estimated iteratively, so it may be prudent to graphically check for convergence. An example of such convergence plot is shown in Figure \ref{supfig:convPlot}.
+
+\clearpage
+
+## Influence measures \label{sec:influence}
+
+The impact of each of the views on the estimation on the latent variables or environmental gradient components can easily be obtained through influence functions \cite{Hampel2011}. Influence functions reflect the influence a certain observation has on a parameter estimate, keeping the other sorts of parameters fixed. Because of the iterative algorithm this latter assumption is incorrect, but the influence functions might still harbour interesting information.
+
+For maximum likelihood estimation, the influence function $\chi(\gamma| f, \mathbf{x})$ of a parameter $\gamma$ for a distribution $f$ and data __x__ is defined as:
+
+$$\chi(\gamma| f, \mathbf{x}) = -\mathbf{S}_f(\gamma|\mathbf{x}) E\big[\mathbf{I}(\gamma|f)\big]^{-1}$$
+ with $\mathbf{S}_f(\gamma|\mathbf{x})$ the score function and $E\big(\mathbf{I}(\gamma|\mathbf{x})\big)$ the expected Fisher information matrix. We use the same concept for the quasi likelihood estimation, by replacing $\mathbf{S}_f(\gamma|\mathbf{x})$ by the quasi score functions and $E\big(\mathbf{I}(\gamma|f)\big)^{-1}$ by the Jacobian matrix. If an observation has a positive influence on a parameter, it means that it tries to "pull its value up". In other words, if the observation would not be there, the parameter estimate would be lower. As the orientation of the final graph is of no importance, it is often sufficient to look at absolute influences.
+
+As an illustration, a dataset with three views was generated using the negative binomial distribution. The number of features are 100, 100 and 1000 respectively. The signal strength (i.e. the fold changes) is the same in all datasets. The first and third datasets have similar levels of overdispersion, the second dataset has high levels of overdispersion. We call these datasets the "regular", "noisy" and "large" datasets. In Figures \ref{supfig:inflPlot}-\ref{supfig:inflPlotBox} it is demonstrated that signal-to-noise ratio of each view drives its influence, rather than the number of features. The noisy dataset has least influence, whereas the influence of the regular and large datasets is comparable.
+
+```{r influence, fig.cap = "\\label{supfig:syntExample}Data integration multiplot of synthetic dataset for the illustration of influence measures.", fig.height = 11}
+if(!file.exists("results/Comp3.RData")){
+#Multi-view fit to test the in#fluence
+n = 50; p = 100; p0 = 0.8; multipl = 1.25
+libSizes = 10^runif(n,3,6)
+abunds = 10^runif(p, -6, -3)
+abunds = abunds/sum(abunds)
+abundsPerm = abunds * abs(c(rnorm(round(p*(1-p0)/2), 12, sd = 0.5), rnorm(round(p*(1-p0)/2), 4, sd = 0.5), rep(1,round(p*p0))))^multipl
+abundsPerm = abundsPerm/sum(abundsPerm)
+abundsPerm2 = abunds * abs(c(rnorm(round(p*(1-p0)/2), 8, sd = 0.5), rnorm(round(p*(1-p0)/2), 10, sd = 0.5), rep(1,round(p*p0))))^multipl
+abundsPerm2 = abundsPerm2/sum(abundsPerm2)
+ods = exp(runif(p, 1,5))
+#A regular one
+nbMat1 = matrix(rnbinom(n*p, mu = rbind(outer(libSizes[1:(n/5)], abunds), outer(libSizes[(n/5+1):(n*2/5)], abundsPerm),
+                                       outer(libSizes[(2*n/5+1):n], abundsPerm2)), 
+                       size = rep(ods, each = n)), n, p)
+# A noisy one
+ods2 = runif(p, 0.01,0.1)
+nbMat2 = matrix(rnbinom(n*p, mu = rbind(outer(libSizes[1:(n/5)], abunds), outer(libSizes[(n/5+1):(n*2/5)], abundsPerm),
+                                       outer(libSizes[(2*n/5+1):n], abundsPerm2)), 
+                       size = rep(ods2, each = n)), n, p)
+# A large one
+p2 = 400
+libSizes = 10^runif(n,3,6)
+abunds = 10^runif(p2, -6, -3)
+abunds = abunds/sum(abunds)
+abundsPerm = abunds * abs(c(rnorm(round(p2*(1-p0)/2), 12, sd = 0.5), rnorm(round(p2*(1-p0)/2), 4, sd = 0.5), rep(1,round(p2*p0))))^multipl
+abundsPerm = abundsPerm/sum(abundsPerm)
+abundsPerm2 = abunds * abs(c(rnorm(round(p2*(1-p0)/2), 8, sd = 0.5), rnorm(round(p2*(1-p0)/2), 10, sd = 0.5), rep(1,round(p2*p0))))^multipl
+abundsPerm2 = abundsPerm2/sum(abundsPerm2)
+ods3 = exp(runif(p2, 1,5))
+nbMat3 = matrix(rnbinom(n*p2, mu = rbind(outer(libSizes[1:(n/5)], abunds), outer(libSizes[(n/5+1):(n*2/5)], abundsPerm),
+                                       outer(libSizes[(2*n/5+1):n], abundsPerm2)), 
+                       size = rep(ods3, each = n)), n, p2)
+
+# A large one with larger libsizes
+libSizesLarge = 10^runif(n,3,6)*p2/p*10
+abunds = 10^runif(p2, -6, -3)
+abunds = abunds/sum(abunds)
+abundsPerm = abunds * abs(c(rnorm(round(p2*(1-p0)/2), 12, sd = 0.5), rnorm(round(p2*(1-p0)/2), 4, sd = 0.5), rep(1,round(p2*p0))))^multipl
+abundsPerm = abundsPerm/sum(abundsPerm)
+abundsPerm2 = abunds * abs(c(rnorm(round(p2*(1-p0)/2), 8, sd = 0.5), rnorm(round(p2*(1-p0)/2), 10, sd = 0.5), rep(1,round(p2*p0))))^multipl
+abundsPerm2 = abundsPerm2/sum(abundsPerm2)
+ods4 = exp(runif(p2, 1,5))
+nbMat4 = matrix(rnbinom(n*p2, mu = rbind(outer(libSizesLarge[1:(n/5)], abunds), outer(libSizesLarge[(n/5+1):(n*2/5)], abundsPerm), outer(libSizesLarge[(2*n/5+1):n], abundsPerm2)), 
+                       size = rep(ods3, each = n)), n, p2)
+
+# Microarray data, one more noisier than the other, lognormal
+pma = 1e4L
+sd1 = runif(pma, 1, 3)
+sd2 = runif(pma, 3, 5)
+rowOffsets = rnorm(n, sd = 0.1)
+colOffsets = runif(pma, 3, 6)
+meanMatMA = outer(rowOffsets, colOffsets, "+")
+meanMatMA[1:(n/5),] = combi:::rowMultiply(meanMatMA[1:(n/5),], c(rnorm(round(pma*(1-p0)/2), 1, sd = 0.5), rnorm(round(pma*(1-p0)/2), 2, sd = 0.5), rep(1,round(pma*p0))))
+meanMatMA[(n/5+1):(n*2/5),] = combi:::rowMultiply(meanMatMA[(n/5+1):(n*2/5),], c(rnorm(round(pma*(1-p0)/2), -2, sd = 0.5), rnorm(round(pma*(1-p0)/2), 1, sd = 0.5), rep(1,round(pma*p0))))
+pmaMat1 = matrix(exp(rnorm(pma*n, mean = meanMatMA, sd = rep(sd1, each = n))), n, pma)
+pmaMat2 = matrix(exp(rnorm(pma*n, mean = meanMatMA, sd = rep(sd2, each = n))), n, pma)
+
+#Assign rownames
+rownames(nbMat1) = rownames(nbMat2) = rownames(nbMat3) = rownames(nbMat4) = rownames(pmaMat1) = rownames(pmaMat2) = seq_len(n)
+id = 1:3
+Comp3 = combi(data = list("RegularDataset" = nbMat1, "NoisyDataset" = nbMat2, "LargeDataset" = nbMat3, "LargeDataSetLargeLibs" = nbMat4, "RegularMicroArray" = pmaMat1, "NoisyMicroArray" = pmaMat2)[id], distribution = c(rep("quasi", 4), rep("gaussian", 2))[id], compositional = c(rep(TRUE, 4), FALSE, FALSE)[id], verbose = TRUE, nCores = 4, M = 2, maxItFeat = 10)
+save(Comp3,p, p2, pma, n, file = "results/Comp3.RData")
+} else {load("results/Comp3.RData")}
+dfComp = data.frame(View = c(rep("RegularDataset", p), rep("NoisyDataset", p), rep("LargeDataset", p2), rep("LargeDataSetLargeLibs", p2), rep("RegularMicroArray", pma), rep("NoisyMicroArray", pma)))
+dfGroup = data.frame(group = c(rep("Group1", n/5), rep("Group2", n/5), rep("Group3", n*3/5)))
+toyPlot = plot(Comp3, samDf = dfGroup, samCol = "group", featNum = 8, checkOverlap = TRUE, samSize = 2.5) + Theme
+toyPlot
+```
+
+```{r influencePlot, fig.cap ="\\label{supfig:inflPlot}Total influence of each view on the estimation of the latent variables in dimension 1 for a toy dataset. Values of latent variables are shown as black crosses. The noisy dataset has least influence over the estimation of the latent variables. The large and regular datasets have similar influence, since they contain a similar signal and the same level of noise.", fig.width = 11}
+totPlot = inflPlot(Comp3, "boxplot", samples = seq_len(10)) + Theme
+totPlot
+```
+
+```{r influencePlot2, fig.cap ="\\label{supfig:inflPlot2}Total influence of each view on the estimation of the latent variables in dimension 2. The large dataset is seen to pull the latent variables in samples 11-20 downwards", fig.width = 11, eval = FALSE}
+inflPlot(Comp3, Dim = 2)+Theme
+```
+
+```{r InfluencePlotBox, fig.cap = "\\label{fig:inflPlotBox}Point plot of absolute values of influences of the feature on the estimation of the latent variables, per view. As expected, average influences are zero (since the algorithm has converged). The regular and large dataset have similar influence."}
+pointPlot = inflPlot(Comp3, plotType = "pointplot")+Theme
+pointPlot
+```
+
+```{r InfluencePlotBoxSingle, fig.cap = "\\label{supfig:inflPlotBox}Boxplots of overall absolute influences of the views on the estimation of the latent variables. It is clear that the features from the noisy dataset have less influence."}
+boxPlotSingle = inflPlot(Comp3, plotType = "boxplotSingle") + xlab("")+Theme
+boxPlotSingle
+rm(Comp3)
+```
+
+```{r saveInflThesis, eval = FALSE, purl = FALSE}
+toyPlot2 = toyPlot +theme(legend.position = "top") + scale_fill_manual(values = c("brown", "purple", "orange"), name ="Group")
+ggsave(plot = toyPlot2, height = 2.8, file = "/home/stijn/PhD/Thesis/Figures/08e_integrate_appendix/influence-1.pdf")
+ggsave(plot = totPlot, height = 3.5, file = "/home/stijn/PhD/Thesis/Figures/08e_integrate_appendix/influencePlot-1.pdf")
+pointPlot2 = pointPlot +theme(legend.position = "top", axis.text.x = element_text(size = 7), legend.text = element_text(size = 11))
+ggsave(plot = pointPlot2, height = 3.5, file = "/home/stijn/PhD/Thesis/Figures/08e_integrate_appendix/InfluencePlotBox-1.pdf")
+ggsave(plot = boxPlotSingle, height = 4, file = "/home/stijn/PhD/Thesis/Figures/08e_integrate_appendix/InfluencePlotBoxSingle-1.pdf")
+```
+
+## Remarks about compositional data analysis
+
+The use of the central log-ratio transform does not guarantee subcompositional coherence for the integration model. Subcompositional coherence means that the conclusions for features $j$ and $j'$ do not change when a third feature $j''$ is omitted from the analysis (e.g. filtered out). However, when a taxon is omitted, the geometric mean of the composition changes, and thus also the outcome of the ordination. Also, because of the iterative nature of the procedure, omitting taxon $j''$ will change the estimates of the latent variables. This will in turn change the estimates of the feature parameters $j$ and $j'$, so that the procedure is not subcompositionally coherent. Because of the same reasons, classical CoDa biplots of log-ratio transformed data are also not subcompositional coherent either. 
+
+Neither is our method scale invariant as is sometimes stated as a requirement for compositional data analysis \cite{Gloor2016, Aitchison1982}. Scale invariance means that the analysis should not depend on the total size if the composition, e.g. the library sizes in case of sequence count data. While it is true that the conclusions are only drawn on the proportions, the sampling variability of the proportions depends on the library size. A sample with 1.000.000 reads carries much more information than a sample with only 10.000 reads, even when the compositions are identical. Hence analysis of heteroscedastic count data should never be fully scale invariant. Ignoring the mean-variance trend in sequence count data leads to technical artefacts in CoDa biplots (see \textcite{Hawinkel2018}, Supplementary material Section 3.4.1).
+
+\cnp
+
+# Visualization
+
+## Multiplots
+
+The resulting data integration can be visualized in a $multiplot$ as follows: 
+
+ 1) Build an orthogonal axis system with equally scaled axes in 2 (or 3) dimensions. Plot the first dimensions of __Z__ as dots. As the dimensions of __Z__ are orthogonal, but not normalized, the distances between the samples reflect the dissimilarities between the samples over all different views.
+ 2) Add arrows from the origin to the locations defined by $\boldsymbol{\gamma}$ and $\boldsymbol{\beta}$, with arbitrary scaling. As the components are orthogonal, the _biplot principle_ holds \cite{Gabriel1971}, and the orthogonal projection of e.g. the vector from the origin to $\boldsymbol{\gamma}_{j}$ onto the vector from the origin to $\mathbf{z}_{i}$ is proportional to the departure from independence of feature $j$ in sample $i$ for the dimensions plotted. Moreover, when the projection $\boldsymbol{\gamma}_{j}^t\boldsymbol{\beta}_{l}$ is large, this indicates that features $j$ from view __X__ and $l$ from view __Y__ are similarly associated to latent variables $\mathbf{Z}$ and are thus correlated. As the feature parameters are also normalized, distances between feature parameters locations cannot be interpreted (it is a so-called _form_ or _sample_ multiplot). To avoid overplotting, it may be necessary to limit the features plotted to the ones with the largest norms (longest arrows), i.e. thresholding.
+ 3) In case of constrained ordination, the components of $\boldsymbol{\alpha}$ can be added to the plot, as arrows or as labels, again with arbitrary scaling. The projection of these variable vectors $\boldsymbol{\alpha}_{b}$ onto $\boldsymbol{\gamma}_{j}$ reveals how sensitive feature $j$ is to changes in variable $b$. Also, the larger the component $\boldsymbol{\alpha}_b$, the more important the variable $b$ is in driving the variability over the different views.
+ 
+The scaling in steps 2 and 3 is usually done such that all coordinates have the same order of magnitude as the sample location, to aid interpretability. Only the relative length of the projections is meaningful.
+ 
+ When some of the views consist of compositional data, the interpretation of the plot is complicated. For compositional data, a positive feature parameter $\boldsymbol{\gamma}_{mj}$ does not guarantee that the feature $j$ is positively associated with the latent variable of dimension $m$. Neither does ${\clr^{-1}(\boldsymbol{\gamma}_{m})}_j>1/p$ guarantee this, as wrongly suggested by \textcite{Xia2013}<!--(error confirmed in personal correspondence) -->. The impact of the feature parameter on the mean of a feature $j$ depends on the values of the other feature parameters of that view, as well as on the value of the latent variable. In an extreme case, for $z_{im} \rightarrow \infty$, the composition collapses into a point mass of 1 at taxon $j$ with the highest $\gamma_{mj}$.
+ 
+ Once the model is fitted, the values of the latent variables and feature parameters are known of course. One can thus simply check that for those features with the largest loadings that would be plotted, the expected abundance does in fact vary monotonically with the latent variable within the observed range of latent variable values. Unfortunately, in practice this is almost never the case for most features. An explanation on how to interpret these biplots under this curse of compositionality is given below.
+ 
+## Compositional multiplots
+
+Compositional biplots have been introduced by \textcite{Aitchison2002} for log-transformed data. The interpretation is the same though in our case of inverse log-transformed parameters, and is less intuitive than for a regular biplot. In a regular biplot, each combination of sample and feature arrows is interpretable. In a compositional setting, a feature arrow can never be interpreted by itself, but should always be interpreted _relatively_ to some other features. Here we discuss the interpretation with respect to 1) all other features of the same view, 2) one other feature of the same view and 3) a feature from another view.
+
+### Intepretation with respect to all other features
+
+The interpretation with respect to all other features is the comparison with the geometric mean (gm) of all proportions:
+
+$$\text{gm}(\boldsymbol{\pi}) = \exp\big(1/p\sum_{j=1}^p\log(\pi_j)\big)$$
+
+The gm behaves similarly to the Shannon index \cite{Shannon1948} in the sense that it can be seen as a measure of evenness. For a perfectly even species composition ($\pi_1 = \pi_2 = \hdots = \pi_p  = 1/p$), the gm equals 1/p. As one feature becomes more and more abundant (one $\pi_j \rightarrow 1$), the gm approaches 0.
+
+In our model, the log ratio of the proportion of one feature _a_ on the gm of the proportions in sample $i$ is a linear function of the latent variables:
+
+$$\log\left(\frac{\pi_{ia}}{\text{gm}(\boldsymbol{\pi}_i)}\right) = e_a + \mathbf{Z}_i^t\boldsymbol{\gamma}_{a}$$
+The biplot can be interpreted as a regular biplot in function of this log-ratio: the larger the projection $\mathbf{Z}_i^t\boldsymbol{\gamma}_a$ becomes, the more this log-ratio departs from the independence model for feature $a$ in sample $i$. Loosely speaking, the larger $\mathbf{Z}_i^t\boldsymbol{\gamma}_a$ becomes, the more _dominant_ feature _a_ becomes. How the proportion $\pi_{ia}$ evolves as a function of $\mathbf{Z}_i$ depends on the numerical values of __e__ as well as $\boldsymbol{\gamma}$. We can make this clear as follows (dropping sample subscripts, and looking at one dimension), knowing that:
+
+$$\pi_a = \frac{\exp(e_a+Z\gamma_a)}{\sum_{j= 1}^p \exp(e_j+Z\gamma_j)}. $$
+Hence, taking the logarithm
+
+$$\log\big[\pi_{a}(Z)\big] = e_a + Z\gamma_a - \log\big(\sum_{j=1}^p\exp(e_j + Z\gamma_j)\big)$$
+
+This takes the shape of the regular log-linear model. To know how this proportion evolves with the latent variable, we take the derivative with respect to $Z$:
+
+$$\frac{\partial \log\big[\pi_{a}(Z)\big]}{\partial Z}  = \gamma_a - \sum_{j=1}^p \gamma_j\pi_j(Z)$$
+
+The orthonormality restriction guarantees that $\sum_{j=1}^p \gamma_j\big[\clr^{-1}(\mb{e})\big]_j = \sum_{j=1}^p \gamma_j\pi_j^{indep} = 0$ for every dimension (see section \ref{supsec:restrictions}). Hence we can also write
+
+$$\frac{\partial \log(\pi_a)}{\partial Z}  = \gamma_a - \sum_{j=1}^p \gamma_j\big(\pi_j(Z)-\pi_j^{indep}\big)$$
+For small departures from independence the second term drops, but for realistic datasets this is not the case. In practice, the second term can even be larger than $\gamma_a$ in absolute value, upsetting the monotonicity of $\pi_a$ with $\gamma_a$. This formula cannot easily be simplified further, the interpretation will have to account for the compositionality. The potential pitfalls of interpreting the log-ratios are illustrated in Figure \ref{fig:cautionaryTale}.
+
+```{r cautionaryTale, fig.cap = "\\label{supfig:caut}Toy example of the spurious effects of the central log ratio (clr) transform. In the top panel, three toy populations of 3 taxa are shown, varying from even on the left to uneven on the right. Dashed lines represent corresponding geometric means of the relative abundances. The bottom panels shows the clr transforms of these populations. Notice how taxon 1 decreases in abundance, while its clr transform increases. This happens because the geometric mean drops faster than the relative abundance as the population becomes less even.", include = FALSE}
+close = function(x) x/sum(x)
+gm = function(x) exp(mean(log(x)))
+clr = function(x) log(x) - mean(log(x))
+fills = c("green","cyan","red", "orange", "purple", "grey")
+colours = c("grey85", "grey50", "black")
+numTaxa = 3
+abs1 = rep(1/numTaxa, numTaxa)
+perturbation = c(1, 0.65, 1.3)
+powers = c(2.5,4)
+abs2 = close(abs1*perturbation^powers[1])#c(0.15,0.19,0.15, 0.49, 0.02)
+abs3 = close(abs1*perturbation^powers[2])#c(0.01,0.185,0.01, 0.775, 0.02)
+df = rbind("Population 1" = abs1, "Population 2" = abs2, 
+                "Population 3" = abs3)
+colnames(df) = paste("Taxon", seq_len(numTaxa))
+df2 = as.data.frame(df)
+df2$geometricMean = apply(df2, 1, gm)
+df2$Population = rownames(df)
+dfMolt = melt(df2, id.vars = c("Population", "geometricMean"))
+dfMolt$trans = "Relative abundance"
+dfClr = t(apply(df, 1, clr))
+colnames(dfClr) = paste("Taxon", seq_len(numTaxa))
+dfClr2 = as.data.frame(dfClr)
+dfClr2$geometricMean = NA
+dfClr2$Population = rownames(dfClr)
+dfMoltClr = melt(dfClr2, id.vars = c("Population", "geometricMean"))
+dfMoltClr$trans = "Central log-ratio transform"
+dfMoltAll = rbind(dfMolt, dfMoltClr)
+transLabels = transLevels = c("Relative abundance", "Central log-ratio transform")
+dfMoltAll$trans = factor(dfMoltAll$trans, ordered = TRUE, labels = transLabels, levels = transLevels)
+dfMoltAll$value[dfMoltAll$value==0] = 0.01 
+cautPlot = ggplot(dfMoltAll, aes(y = value, x = Population, fill = variable, 
+                      group = variable)) +
+    geom_bar(stat = "identity", position = "dodge", size = 1.5) +
+    facet_grid(row = vars(trans), scales = "free_y") +
+    geom_hline(aes(yintercept = geometricMean, col = Population), linetype ="dashed") +
+    scale_fill_manual(values = fills, name = "Taxon") +
+    scale_colour_manual(values = colours, name ="Geometric mean") +
+    theme_bw() +
+    scale_y_continuous(name = "") + xlab("") + Theme #+
+    #theme(legend.position = "top") #+ 
+    #guides(fill = guide_legend(nrow = 3, title.position = "top"), 
+    #       colour = guide_legend(nrow = 3, title.position = "top"))
+cautPlot
+ggsave("Manuscript/Figures/cautionaryTale.pdf", width = 20, height = 14, units = "cm")
+ggsave(plot = cautPlot + theme(strip.text = element_text(size = 11)), filename = "/home/stijn/PhD/Thesis/Figures/06d_integrate/cautionaryTale.pdf", width = 20, height = 12, units = "cm")
+```
+
+### Interpretation with respect to other features in the same view
+
+As the interpretation with respect to "the rest of the features" (represented by the geometric mean) is so problematic, it may be easier to compare just two features. We look at the log-ratio between the relative abundances of two features $\pi_a$ and $\pi_b$ in sample _i_. According to the model:
+
+$$\log\left(\frac{\pi_a}{\pi_b}\right) - \log\left(\frac{\pi_a^{indep}}{\pi_b^{indep}}\right) = \mathbf{Z}_{i}^t(\boldsymbol{\gamma}_{a}-\boldsymbol{\gamma}_{b}), $$
+
+with $\pi_j^{indep} = \clr^{-1}(\mathbf{e})_j$ the proportion under the independence model. Note that we have eliminated $\text{gm}(\boldsymbol{\pi})$ from the expression. The expression on the left hand side has the form of a log odds ratio as in logistic regression, but with the difference that $\frac{\pi_a}{\pi_b}$ and $\frac{\pi_a^{indep}}{\pi_b^{indep}}$ are not genuine odds.
+
+The difference $(\boldsymbol{\gamma}_{a}-\boldsymbol{\gamma}_{b})$ between vectors is known as the _link_ in a plot, i.e. the straight line connecting the points defined by $\boldsymbol{\gamma}_a$ and $\boldsymbol{\gamma}_b$. It is small when the arrows $\boldsymbol{\gamma}_{a}$ and $\boldsymbol{\gamma}_{b}$ point in approximately the same direction with the same magnitude ($\boldsymbol{\gamma}_a \approx \boldsymbol{\gamma}_b$). In that case the ratio of the relative abundances $\frac{\pi_a}{\pi_b}$ will not differ from that under the independence model $\frac{\pi_a^{indep}}{\pi_b^{indep}}$ by much in _any_ sample. In a compositional setting, a stable ratio means that the features are strongly correlated \cite{Aitchison1982}. 
+
+In case this link is large, the projection of the latent variable vector $\mathbf{Z}_{i.}$ onto the link (i.e. $\mathbf{Z}_{i}^t(\boldsymbol{\gamma}_{a}-\boldsymbol{\gamma}_{b})$) indicates how much and in which direction the ratio $\frac{\pi_a}{\pi_b}$ differs from that under the independence model \cite{Aitchison2002}. Note that this implies that feature arrows pointing in the same direction but with different magnitudes (i.e. $\frac{\boldsymbol{\gamma}_{a}}{||\boldsymbol{\gamma}_{a}||} = \frac{\boldsymbol{\gamma}_b}{||\boldsymbol{\gamma}_b||}$ but $\boldsymbol{\gamma}_{a} \neq \boldsymbol{\gamma}_{b}$) are not necessarily strongly correlated in all samples! The interpretations discussed above are illustrated graphically in Figures \ref{fig:interprets} and \ref{supfig:addLink2}-\ref{supfig:addLink3}.
+
+```{r illustrLink2, fig.cap = "Example of the projection of a link between two features (features 20 and 10, red dashed line) onto a sample (black line). The red sample on top has a high projection (in orange) onto the link connecting both features. Hence it has a much higher feature 20/feature 10 ratio than under the independence model.\\label{fig:illustrLink2}", eval = FALSE}
+addLink(compPlot, links = cbind(0.25, 0.45, 0.25, -0.3), samples = c(0,0.6), Views = c(1,1))
+```
+
+```{r illustrLink3, fig.cap = "Example of the projection of a link between two features (features 20 and 10, red dashed line) onto a sample (black line). The red sample on the left has only a tiny projection onto the link connecting both features. Hence its feature 20/feature 10 ratio is very similar to that under the the independence model. In other words, both features are strongly correlated in this sample\\label{fig:illustrLink3}", eval = FALSE}
+addLink(compPlot, links = cbind(0.25, 0.45, 0.25, -0.3), samples = c(-1.2, -0.01), Views = c(1,1)) 
+```
+
+```{r illustrLink4, fig.cap = "Example of projection for the ratio between features 4 and 10. Even though both feature arrows lie in the same general direction from the origin, they do not have the same length. Hence their ratio can still vary considerably, and they are not necessarily correlated. The red sample on top has a moderate projection onto the link connecting both features. Hence its feature 4/feature 10 ratio is much lower than under the the independence model.\\label{fig:illustrLink4}", eval = FALSE}
+addLink(compPlot, links = cbind(0.25, -0.3, 0.25, -0.5), samples = c(0, 0.6), Views = c(1,1)) 
+```
+
+### Interpretation between features of different views
+
+The interpretation between features of different, compositional views, or between features from a compositional view and a non-compositional view is even more difficult. Of course the interpretation with respect to the central log-ratio is always valid, but not intuitive. If arrows of feature _a_ in view 1, and feature _b_ in view 2 point in the same direction, their central-log ratio transforms are correlated. This means that moving along this direction, both features become "more dominant" in their own views, although this need not imply that their abundances also increase. Features from two non-compositional views are correlated if they lie on the same side of the origin.
+
+\clearpage
+
+# Real data examples
+
+In this section the data integration plots of real data are shown for the integrations that were not shown in the main paper.
+
+## HMP2 data
+
+The Human Microbiome Project 2 (HMP2), or integrative HMP (iHMP), aims to investigate the relationship between the microbiome and host responses. It extends the original, cross sectional HMP by also including longitudinal samples. Here we focus on the datasets in the "The Inflammatory Bowel Disease Multi'omics Database" (IBDMDB), which contains healthy and IBD patients (patients with both forms of IBD, Crohn's disease (CD) and ulcerative colitis (UC), are included), see the [project website](https://ibdmdb.org/). A total of 90 subjects was be profiled for one year. The HMP2 dataset contains many different types of omics data, from which we selected the following.
+
+The microbiome composition of the stool was assessed through sequencing of the 16S rRNA gene. The proteome was measured in fecal, nasal and blood samples. Proteins were separated by liquid chromatography and then identified using mass spectroscopy. This yields counts of proteins. The proteins were then classified biochemically (EC) or phylogenetically (KO). We use the latter convention here. Proteomics data are also to be considered compositional \cite{Obrien2018}. The composition of the virome of the stool was measured by sequencing marker genes as for the microbiome data. Data integration multiplots of these datasets can be found in Figures \ref{fig:microVir}-\ref{supfig:microVirProteo}.
+
+```{r sampleMatching, include = FALSE}
+selectionDf = hmp2_metadata
+selectionDf$Education.Level[selectionDf$Education.Level==""] = "Unknown/Not Reported"
+selectionDf$Occupation[selectionDf$Occupation == ""] = "Unknown/Not Reported"
+selectionDf = droplevels(selectionDf)
+#No cross section needed for exploration, time is considered a covariate
+ microbiomeDf = selectionDf[selectionDf$data_type %in% "biopsy_16S",]
+## Mircobiome-virome ##
+# No more filtering on week
+microbiomeDf2 = selectionDf[selectionDf$data_type %in% "biopsy_16S" & 
+                                selectionDf$biopsy_location %in% "Ileum",] 
+#Take the ileum, as the virome is from the stool
+virDf = selectionDf[selectionDf$data_type %in% "viromics",]
+#Match patient and visit number
+microbiomeDf2$PatientDat = apply(microbiomeDf2[, c("Participant.ID", "visit_num")], 1, paste, collapse = "_")
+virDf$virPatientDat = apply(virDf[, c("Participant.ID", "visit_num")], 1, paste, collapse = "_")
+commonpatientDatVirMicro = intersect(microbiomeDf2$PatientDat, 
+                                         virDf$virPatientDat) #Fail
+#Then match patients, for microbiome take the first visit, for virome the earliest one. The definition of matching is not always clear
+microbiomeDf5 = microbiomeDf2[microbiomeDf2$visit_num==1,]
+virDf = virDf[order(virDf$Participant.ID, virDf$visit_num),]
+virID = unlist(tapply(virDf$visit_num, virDf$Participant.ID, FUN = function(x){x==min(x)}))
+virDf2 = virDf[virID,]
+commonPatientVirMicro = intersect(microbiomeDf5$Participant.ID, virDf2$Participant.ID)
+virDf3 = virDf2[match(commonPatientVirMicro, virDf2$Participant.ID, nomatch = 0),]
+microbiomeDf6 = microbiomeDf5[match(commonPatientVirMicro, microbiomeDf5$Participant.ID, nomatch = 0),]
+
+## Microbiome - proteome ##
+#Proteome data are from the stool
+proteoKODf = selectionDf[selectionDf$data_type %in% "proteomics",]
+#Match patients
+commonPatientProtMicro = intersect(microbiomeDf$Participant.ID, proteoKODf$Participant.ID)
+proteoKODf2 = proteoKODf[match(commonPatientProtMicro, proteoKODf$Participant.ID, nomatch = 0),]
+microbiomeDf8 = microbiomeDf[match(commonPatientProtMicro, microbiomeDf$Participant.ID, nomatch = 0),]
+all(proteoKODf2$Participant.ID == microbiomeDf8$Participant.ID)
+
+## Microbiome - virome - proteome ##
+micVirProInt = intersect(commonPatientVirMicro, commonPatientProtMicro)
+microDf3way = microbiomeDf5[match(micVirProInt, microbiomeDf5$Participant.ID, nomatch = 0),]
+virDf3way = virDf2[match(micVirProInt, virDf2$Participant.ID, nomatch = 0),]
+protDf3way = proteoKODf[match(micVirProInt, proteoKODf$Participant.ID, nomatch = 0),]
+all(protDf3way$Participant.ID == virDf3way$Participant.ID)
+all(protDf3way$Participant.ID == microDf3way$Participant.ID)
+HMP2covars = c( "biopsy_location", "diagnosis", "Probiotic", "Antibiotics", "Chemotherapy", "Were.you.born.via.C.section.", "Children", "sex", "smoking.status")#"Education.Level", "Occupation",
+rm(selectionDf, virDf, virDf2, microbiomeDf5, microbiomeDf)
+```
+
+### Microbiome-virome integration
+
+```{r virMicrobiome, fig.cap = "\\label{fig:microVir}Data integration plot of microbiome and virome data from the HMP2 project. Viral taxa are shown in green, bacterial taxa in blue"}
+if(!file.exists(file = "results/microVirDI.RData")){
+microPruneVir = prune_samples(hmp2phylo, samples = as.character(microbiomeDf6$External.ID))
+virPrune = prune_samples(virvirMapPhylo, samples = as.character(virDf3$External.ID))
+sample_names(virPrune) = sample_names(microPruneVir)
+
+#First check the mean variance trends
+par(mfrow = c(1,2))
+foo = lapply(extractData(list(microPruneVir, virPrune)), checkMeanVarTrend)
+par(mfrow = c(1,1))
+
+microVirDI = combi(data = list(microPruneVir, virPrune), distributions = c("quasi", "quasi"), compositional = c(TRUE, TRUE), verbose = TRUE, nCores = 2)
+
+microVirDIconstr = combi(data = list(microPruneVir, virPrune), distributions = c("quasi", "quasi"), compositional = c(TRUE, TRUE), verbose = TRUE, nCores = 2, covariates = droplevels(microbiomeDf6[,HMP2covars]))
+microVirDIDf = microbiomeDf6
+rownames(microVirDIDf) = microVirDIDf$External.ID
+save(microVirDI, microVirDIDf, microVirDIconstr, file = "results/microVirDI.RData")
+} else {load(file = "results/microVirDI.RData")}
+# convPlot(microVirDI)
+# convPlot(microVirDI, Dim = 2) #Convergence ok
+plot(microVirDI, samDf = microVirDIDf, samCol = "diagnosis", checkOverlap = TRUE)
+rm(microbiomeDf6)
+```
+
+```{r microVirConstrained, fig.cap = "\\label{supfig:microVirConstr}Constrained ordination of HMP2 microbiome and virome data. Viral taxa are shown in green, bacterial taxa in blue, patient variables in black."}
+plot(microVirDIconstr, samDf = microVirDIDf, samCol = "diagnosis")
+rm(microVirDI, microVirDIDf, microVirDIconstr)
+```
+
+```{r microbiomeProteomics, fig.cap ="\\label{fig:microProt}Data integration plot of microbiome and proteome data from the HMP2 project. Microbiome taxa are shown in blue, proteins in green.", include = FALSE}
+if(!file.exists(file = "results/microProteo.RData")){
+microPruneProtKO = prune_samples(hmp2phylo, samples = as.character(microbiomeDf8$External.ID))
+protKOPrune = hmp2proteomicsKO[as.character(proteoKODf2$External.ID),]
+foo = checkMeanVarTrend(hmp2proteomicsKO) #Spline fits best
+rownames(protKOPrune) = sample_names(microPruneProtKO)
+microProteo = combi(data = list("microbiome" = microPruneProtKO, "proteome" = protKOPrune), distributions = c("quasi", "quasi"), compositional = c(TRUE, TRUE), verbose = TRUE)
+microbiomeDf8$biopsy_location[!microbiomeDf8$biopsy_location %in% c("Ileum", "Rectum")] = NA
+microProteoDIDf = microbiomeDf8
+rownames(microProteoDIDf) = microProteoDIDf$External.ID
+microProteoConstr = combi(data = list("microbiome" = microPruneProtKO, "proteome" = protKOPrune), distributions = c("quasi", "quasi"), compositional = c(TRUE, TRUE), verbose = TRUE, covariates = droplevels(microbiomeDf8[, HMP2covars]))
+save(microProteo, microProteoDIDf, microProteoConstr, file = "results/microProteo.RData")
+} else {load(file = "results/microProteo.RData")}
+plot(microProteo, samDf = microProteoDIDf, samCol = "diagnosis", checkOverlap = TRUE) + Theme + theme(legend.position = "top")
+ggsave(filename = "Manuscript/Figures/microProteoUnconstr.pdf", height = 15, width = 20, units = "cm")
+rm(microbiomeDf8)
+```
+
+```{r HMP2microProteoConstr, fig.cap = "Constrained integration plot of microbiome and proteome data from the HMP2 project. Microbiome taxa are shown in blue, proteins in green, patient variables in black.\\label{supfig:microProteoConstr}", include = FALSE}
+plot(microProteoConstr, samDf = microProteoDIDf, samCol = "diagnosis", featNum = 7, varSize = 4.5, featSize = 4, samSize = 3, checkOverlap = TRUE) + 
+    Theme + theme(legend.position = "top")  + 
+    scale_fill_discrete(name = "Diagnosis") + xlim(-1.25, 1.6)
+ggsave(filename = "Manuscript/Figures/microProteoConstr.pdf", height = 14, width = 17, units = "cm")
+```
+
+```{r addLink, fig.cap= "\\label{supfig:addLink1}Data integration plot of microbiome and Proteome data from the HMP2 project. Coloured dots represent patients, labels represent features of microbiome (blue) and proteome (green). The red dashed line shows the link between taxa \\textit{Unc04y3m} and \\textit{FNWNL488}, the orange line its projection onto the non-IBD sample vector on the left. This projection is large, such that the ratio FNWNL448/Unc04y3m is much larger in this sample than in the average sample. On the other hand, taxa \\textit{Unc018j2} and \\textit{FNWNL488} are really close together, and have a short link. This implies that their ratio differs very little over all samples, and these features' abundances are thus correlated.", include = FALSE}
+microProtPlot = plot(microProteo, samDf = microProteoDIDf, samCol = "diagnosis", 
+                     returnCoords = TRUE, featNum = 9, featSize = 2.5, checkOverlap = TRUE)
+addLink(microProtPlot, cbind("Unc04y3m","FNWNL448"), Views = 1, samples = c(-0.375, -0.1)) + Theme +
+    theme(axis.text = element_text(size = 8), legend.text = element_text(size = 9), 
+          legend.title = element_text(size = 9), axis.title = element_text(size = 8)) + 
+    scale_fill_discrete(name = "Diagnosis")
+ggsave(filename = "Manuscript/Figures/addLink1.pdf", height = 9.5, width = 14, units = "cm")
+```
+
+```{r addLink2, fig.cap ="\\label{supfig:addLink2} Data integration plot of microbiome and proteome data from the HMP2 project. Coloured dots represent patients, labels represent features of microbiome (blue) and proteome (green). The red dashed line shows the link between taxa \\textit{Unc04y3m} and \\textit{FNWNL488}, the orange line its projection onto the non-IBD sample vector bottom right. This projection is small, such that the ratio FNWNL448/Unc04y3m is not different in this sample from the average sample."}
+addLink(microProtPlot, cbind("Unc04y3m","FNWNL448"), Views = 1, samples = c(0.1, -0.18)) + Theme +
+    theme(axis.text = element_text(size = 8), legend.text = element_text(size = 9), legend.title = element_text(size = 9), axis.title = element_text(size = 8)) + 
+    scale_fill_discrete(name = "Diagnosis")
+ggsave(filename = "Manuscript/Figures/addLink2.pdf", height = 10, width = 14, units = "cm")
+```
+
+```{r addLink3, fig.cap ="\\label{supfig:addLink3} Data integration plot of microbiome and proteome data from the HMP2 project. Coloured dots represent patients, labels represent features of microbiome (blue) and proteome (green). The red dashed line shows the link between taxa \\textit{Unc018j2} and \\textit{Unc86145}, the orange line its projection onto the CD sample vector on the bottom. Despite the two taxon arrows pointing in the same direction, the projection onto the sample vector is not zero, and hence ratio H0LBivi4/Unc04y3m is larger in this sample than in the average sample."}
+addLink(microProtPlot, cbind("Unc018j2","Unc86145"), Views = 1, samples = c(0, -0.3))+ Theme +
+    theme(axis.text = element_text(size = 8), legend.text = element_text(size = 9), legend.title = element_text(size = 9), axis.title = element_text(size = 8)) + 
+    scale_fill_discrete(name = "Diagnosis")
+rm(microProtPlot)
+```
+
+```{r ProteoInfl, fig.cap = "\\label{fig:microProtInfl}Influence of microbiome and proteomics views. The proteome has the strongest influence on the estimation for all latent variables.", include = FALSE}
+inflPlot(microProteo, plotType = "boxplot", samples = seq_len(10)) + Theme +
+    ggtitle("")
+ggsave( "Manuscript/Figures/influence.pdf", height = 9.5, 
+       width = 14, units = "cm")
+rm(microProteo, microProteoDIDf, microProteoConstr)
+```
+
+\clearpage
+
+### Microbiome-proteome-virome integration
+
+```{r microbVirProteo, fig.cap = "\\label{supfig:microVirProteo}Quadriplot of HMP2 microbiome, proteome and virome data integration. Corresponding features are represented in blue, green and red."}
+#Show off with three-way integration
+if(!file.exists(file ="results/microVirProteo.RData")){
+microPruneProtKOVir = prune_samples(hmp2phylo, samples = as.character(microDf3way$External.ID))
+protKOPrune3way = hmp2proteomicsKO[as.character(protDf3way$External.ID),]
+virPrune3way = prune_samples(virvirMapPhylo, samples = as.character(virDf3way$External.ID))
+rownames(protKOPrune3way) = sample_names(virPrune3way) = sample_names(microPruneProtKOVir)
+DI3way = combi(data = list("microbiome" = microPruneProtKOVir, "proteome" = protKOPrune3way, "virome" = virPrune3way), distributions = c("quasi", "quasi", "quasi"), compositional = c(TRUE, TRUE, TRUE), verbose = TRUE, meanVarFit = c("spline", "spline", "spline"), nCores = 3)
+DI3wayConstr = combi(data = list("microbiome" = microPruneProtKOVir, "proteome" = protKOPrune3way, "virome" = virPrune3way), distributions = c("quasi", "quasi", "quasi"), compositional = c(TRUE, TRUE, TRUE), verbose = TRUE, meanVarFit = c("spline", "spline", "spline"), nCores = 3, covariates = microDf3way[, HMP2covars])
+microProteoVirDIDf = microDf3way
+rownames(microProteoVirDIDf) = microProteoVirDIDf$External.ID
+save(DI3way, microProteoVirDIDf, DI3wayConstr, file ="results/microVirProteo.RData")    
+} else {load(file ="results/microVirProteo.RData")}
+plot(DI3way, samDf = microProteoVirDIDf, samCol = "diagnosis", checkOverlap = TRUE, samSize = 2.5, featSize = 3.5)
+rm(microDf3way)
+```
+
+```{r threeWayConstr, fig.cap = "\\label{supfig:microVirProteo}Pentaplot of HMP2 microbiome, proteome and virome constrained data integration. Corresponding features are represented in blue, green and red."}
+plot(DI3wayConstr, samDf = microProteoVirDIDf, samCol = "diagnosis", 
+     checkOverlap = TRUE, featNum = 10) + theme(legend.position = "top") + 
+    xlim(-1, 1.2)
+rm(DI3way, DI3wayConstr, hmp2_metadata)
+```
+
+\cnp
+
+## Zhang data
+
+This study investigated the effect of one or three pulsed antibiotic treatments (PAT) on the onset of type I diabetes in mice \cite{Zhang2018b}. Many views were measured, including gut microbiome, metagenomics, metabolic pathways and intestinal immunity pathways. Microbiome composition determined through 16S sequencing. Intestinal immunity pathways measured using Nanostring. This is basically expression profiling but focused on a subset of genes involved in immunity. <!-- This dataset contains a strong batch effect. --> The original publication focused on the effect of the PAT on all different views, without attempting to integrate the different views.
+
+```{r ZhangMicroExploration, eval = FALSE}
+microPhylo
+hist(sample_sums(microPhylo), main = "Library sizes")
+hist(log10(taxa_sums(microPhylo)/sum(taxa_sums(microPhylo))), main = "Log10 relative abudances")
+hist(rowMeans(as(otu_table(microPhylo), "matrix")==0), main = "Zero frequencies per taxon")
+checkMeanVarTrend(t(as(otu_table(microPhylo), "matrix")))
+rcmMicroPhyloFile = "results/rcmMicroPhylo.RData"
+if(!file.exists(rcmMicroPhyloFile)){
+rcmMicroPhylo = RCM(microPhylo)
+rcmMicroPhyloConstr = RCM(microPhylo, covariates = c("Sex", "Treatment", "Time", "Tissue"))
+save(rcmMicroPhylo, rcmMicroPhyloConstr, file = rcmMicroPhyloFile)
+} else load(rcmMicroPhyloFile)
+plot(rcmMicroPhylo, samShape = "Treatment", samColour = "Time")
+#Definitely a treatment signal
+plot(rcmMicroPhyloConstr, samShape = "Treatment", samColour = "Time")
+```
+
+```{r ZhangImmunoExploration, eval = FALSE}
+immuno
+hist(sample_sums(immuno), main ="Library sizes")
+hist(log10(taxa_sums(immuno)/sum(taxa_sums(immuno))), main = "Log10 relative abudances")
+hist(rowMeans(as(otu_table(immuno), "matrix")==0), main = "Zero frequencies per taxon")
+#Far fewer zeroes
+checkMeanVarTrend(t(as(otu_table(immuno), "matrix")))
+#Also a mean-variance trend
+rcmimmunoFile = "results/rcmimmuno.RData"
+if(!file.exists(rcmimmunoFile)){
+rcmimmuno = RCM(immuno)
+rcmimmunoCond = RCM(immuno, confounders = "batch")
+save(rcmimmuno, rcmimmunoCond, file = rcmimmunoFile)
+} else load(rcmimmunoFile)
+plot(rcmimmuno, samShape = "batch", samColour = "Treatment")
+#Very strong batch effect!
+plot(rcmimmunoCond, samShape = "batch", samColour = "Treatment")
+```
+
+```{r zhangExploreMetabolomics, eval = FALSE}
+hist(colMeans(metabolSerum))
+pca = eigen(crossprod(metabolSerum))
+plot(pca$value, main = "Scree plot", ylab = "Eigenvalues", xlab = "Index")
+#One dimension dominates
+pcaMat = with(pca, diag(values) %*% vectors)
+plot(pcaMat, type = "n", asp = 1, xlim = c(-4.5e13, 1e13));text(x = pcaMat[,1], y = pcaMat[,2], labels = colnames(metabolSerum),
+     ylab ="Variable loading", xlab = "Variable", cex = 0.75)
+# A few components explain most variability: alanine and beta_hydroxybutyric acid. Alanine is simply very abundant
+boxplot(metabolSerum, las = 2)
+
+pcaScaled = eigen(crossprod(scale(metabolSerum)))
+plot(pcaScaled$value, main = "Scree plot", ylab = "Eigenvalues", xlab = "Index")
+#More dimensions matter
+pcaMatScaled = with(pcaScaled, diag(values) %*% vectors)
+plot(pcaMatScaled, type = "n", xlim = c(-70,230))
+text(x = pcaMatScaled[,1],y = pcaMatScaled[,2], labels = colnames(metabolSerum), 
+     ylab ="Variable loading", xlab = "Variable", cex = 0.75)
+# In the scaled version, other components become important
+```
+
+### Microbiome-immunological data integration
+
+```{r zhangIntMicroImmuno, fig.cap = "Data integration of microbiome and immunological Zhang data. The respective features are shown as blue and green labels. \\label{fig:zhangIntImmuno}"}
+commonMouseID1 = intersect(get_variable(microPhylo, "Mouse_ID"), get_variable(immuno, "Mouse_ID"))
+#Common mouse IDs
+smallestTimePerMouse = tapply(get_variable(microPhylo, "Time") , get_variable(microPhylo, "Mouse_ID"), min)
+#Select first time mice are recoreded to avoid doubles
+pasteMouseTime = paste(names(smallestTimePerMouse), smallestTimePerMouse, sep = "_")
+# A combination of mouse id and time
+microPhyloSub1 = prune_samples(microPhylo, samples = get_variable(microPhylo, "Mouse_ID") %in% commonMouseID1 & get_variable(microPhylo, "Tissue") =="IL" & paste(get_variable(microPhylo, "Mouse_ID"), get_variable(microPhylo, "Time"), sep = "_") %in% pasteMouseTime)
+sample_names(microPhyloSub1) = get_variable(microPhyloSub1, "Mouse_ID")
+immunoSub1 = prune_samples(immuno, samples = get_variable(immuno, "Mouse_ID") %in% commonMouseID1)
+sample_names(immunoSub1) = get_variable(immunoSub1, "Mouse_ID")
+microImmunoFile = "results/microImmuno.RData"
+if(!file.exists(microImmunoFile)){
+microImmunoInt = combi(list("microbiome" = microPhyloSub1, "immuno" = immunoSub1), distributions = rep("quasi",2), compositional = rep(TRUE, 2), verbose = TRUE)
+microImmunoIntCond = combi(list("microbiome" = microPhyloSub1, "immuno" = immunoSub1), distributions = rep("quasi",2), compositional = rep(TRUE, 2), verbose = TRUE, confounders = list(NULL, as.data.frame(get_variable(immunoSub1, "batch"))))
+microImmunoIntConstr = combi(list("microbiome" = microPhyloSub1, "immuno" = immunoSub1), distributions = rep("quasi",2), compositional = rep(TRUE, 2), verbose = TRUE, covariates = get_variable(microPhyloSub1, c("Sex","ABX","T1D","weight")))
+save(microImmunoInt, microImmunoIntConstr, microImmunoIntCond, file = microImmunoFile)
+} else load(microImmunoFile)
+plot(microImmunoInt, samCol = "Treatment", samDf = sample_data(get_variable(immunoSub1)), samShape = "batch", samSize = 3, featSize = 3)
+# plot(microImmunoIntCond, samCol = "Treatment", samDf = sample_data(get_variable(immunoSub1)), samShape = "batch", samSize = 3, featSize = 3)
+```
+
+```{r ZhangMicroImmuno}
+fileZhangOthers = "results/zhangOthers.RData"
+#Also try out some other analyses for this unconstrained ordination
+if(!file.exists(fileZhangOthers)){
+zhangMicroImmunoOthers = comboSim(
+    list("microbiome" = t(as(otu_table(microPhyloSub1), "matrix")), 
+         "immuno" = t(as(otu_table(immunoSub1), "matrix")[,sample_names(microPhyloSub1)])))
+save(file = fileZhangOthers, zhangMicroImmunoOthers)
+} else {load(fileZhangOthers)}
+samplesPlot = c("pca", "correspFit", "pcaFitClr", "MOFA")
+pointSizeComb = 4
+#Library sizes
+libSizesOverall = sample_sums(microPhyloSub1) +
+    sample_sums(immunoSub1)[sample_names(microPhyloSub1)]
+#PCA
+pcaclrPlot = ggplotSamples(zhangMicroImmunoOthers[["pcaFitClr"]]$sampleScores, libSizesOverall, samVar = "Overall sample\n sums", samShape = get_variable(microPhyloSub1, "Treatment"), shapeName = "Treatment", title = NULL, pointSize = pointSizeComb) +Theme +theme(legend.text = element_text(size = 20), legend.title = element_text(size = 21),
+          strip.text.x = element_text(size = 15), axis.title = element_text(size = 21), 
+          axis.text.y = element_text(size = 15), strip.text.y = element_text(size = 14))
+ggsave(plot = pcaclrPlot, filename = "Manuscript/Figures/ZhangPCACLR.pdf", units = "cm", width = 19.3, height = 12)
+#Combi
+microImmunoPlot = 
+    plot(microImmunoInt, samCol = "Overall_sample_sums", samShape = "Treatment", samDf = cbind(sample_data(get_variable(microPhyloSub1)), "Overall_sample_sums" = libSizesOverall), featNum = 0, samSize = pointSizeComb) + 
+    scale_fill_gradient(low = "yellow", high = "blue") + scale_shape_manual(values = 21:25) +
+    guides(shape = FALSE, fill = FALSE) +Theme +
+theme(legend.text = element_text(size = 20), legend.title = element_text(size = 21),
+    strip.text.x = element_text(size = 15), axis.title = element_text(size = 21), 
+    axis.text.y = element_text(size = 15), strip.text.y = element_text(size = 14))
+ggsave(plot = microImmunoPlot, filename = "Manuscript/Figures/ZhangMicroImmuno.pdf", units = "cm", width = 16, height = 12)
+ggsave(plot = microImmunoPlot,"/home/stijn/PhD/Thesis/Figures/06d_integrate/ZhangMicroImmuno.pdf", width = 16, height = 12, units = "cm")
+```
+
+```{r pca, fig.cap = "\\label{subfig:pca}Sample ordination of Zhang microbiome and immunological data by principal component analysis. Samples are coloured by overall sample sizes, sample shapes reflect treatment group.", fig.height = 5, fig.width = 6}
+pointSizeComb = 2.5
+ggplotSamples(zhangMicroImmunoOthers[["pca"]]$sampleScores, libSizesOverall, "PCA", 
+              samShape = get_variable(microPhyloSub1, "Treatment"), 
+              samVar = "Overall sample\n sums", shapeName = "Treatment", pointSize = pointSizeComb)
+```
+
+```{r corresp, fig.cap = "\\label{subfig:corresp}Sample ordination of Zhang microbiome and immunological data by correspondence analysis. Samples are coloured by overall sample sizes, sample shapes reflect treatment group.", fig.height = 5, fig.width = 6}
+ggplotSamples(zhangMicroImmunoOthers[["correspFit"]]$sampleScores, libSizesOverall, 
+              "Correspondence analysis", samShape = get_variable(microPhyloSub1, "Treatment"),
+              samVar = "Overall sample\n sums", shapeName = "Treatment", pointSize = pointSizeComb) 
+```
+
+```{r mofa, fig.cap = "\\label{subfig:mofa}Sample ordination of Zhang microbiome and immunological data by MOFA. Samples are coloured by overall sample sizes, sample shapes reflect treatment group.", fig.height = 5, fig.width = 6}
+ggplotSamples(zhangMicroImmunoOthers[["MOFA"]]$sampleScores, libSizesOverall, "MOFA", 
+              samShape = get_variable(microPhyloSub1, "Treatment"), samVar = "Overall sample\n sums", 
+              shapeName = "Treatment", pointSize = pointSizeComb) 
+```
+
+```{r microImmunoBatchCorrection, eval = FALSE}
+microImmunoIntBatch = combi(list("microbiome" = microPhyloSub1, "immuno" = immunoSub1), distributions = rep("quasi", 2), compositional = rep(TRUE, 2), confounders = list(NULL, get_variable(immunoSub1, "batch")), verbose = TRUE)
+```
+
+```{r microImmunoConstr, fig.cap = "\\label{fig:zhangmicroImmunoConstr}Constrained data integration of Zhang microbiome and immunological data. The respective features are shown as blue and green labels."}
+plot(microImmunoIntConstr, samCol = "Treatment", samDf = sample_data(microPhyloSub1))
+rm(microImmunoIntConstr)
+```
+
+\clearpage
+
+### Microbiome-metabolome integration
+
+```{r zhangIntMicroMetabo, fig.cap = "\\label{fig:zhangmicroMetabo}Unconstrained data integration of Zhang microbiome and metabolome data. The respective features are shown as blue and green labels."}
+commonMouseID3 = intersect(get_variable(microPhylo, "Mouse_ID"), rownames(metabolSerum))
+microPhyloSub3 = prune_samples(microPhylo, samples = get_variable(microPhylo, "Mouse_ID") %in% commonMouseID3 & get_variable(microPhylo, "Tissue") == "IL")
+sample_names(microPhyloSub3) = get_variable(microPhyloSub3, "Mouse_ID")
+metabolSub3 = metabolSerum[sample_names(microPhyloSub3),]
+microMetaboFile = "results/microMetaboInt.RData"
+if(!file.exists(microMetaboFile)){
+microMetaboInt = combi(list("microbiome" = microPhyloSub3, "metabolomics" = metabolSub3), 
+                         distributions = c("quasi", "gaussian"), compositional = c(TRUE, FALSE), 
+                         logTransformGaussian = FALSE, verbose = TRUE)
+covariatesMetaPhylo = cbind(get_variable(microPhyloSub3, c("Sex", "Time", "ABX")), metabolMap[match(rownames(metabolSub3),metabolMap$Mouse_ID), c("Sample.Weight.(mg)"), drop = FALSE])
+names(covariatesMetaPhylo)[names(covariatesMetaPhylo)=="Sample.Weight.(mg)"] = "Sample.Weight"
+microMetaboIntConstr = combi(
+    list("microbiome" = microPhyloSub3, "metabolomics" = metabolSub3), 
+    distributions = c("quasi", "gaussian"), compositional = c(TRUE, FALSE), 
+    logTransformGaussian = FALSE, covariates = covariatesMetaPhylo, verbose = TRUE)
+save(microMetaboInt, microMetaboIntConstr, microPhyloSub3, file = microMetaboFile)
+} else load(microMetaboFile)
+plot(microMetaboInt, samCol = "Treatment", samDf =sample_data(microPhyloSub3), checkOverlap = TRUE, featSize = 3, samSize = 2) + xlim(-2.5, 4.5)
+#inflPlot(microMetaboInt, plotType = "boxplot")
+```
+
+```{r convergencePlot, fig.cap = "Convergence plot for the latent variable estimates of dimension 1 of the microbiome-metabolome integration of the Zhang data.\\label{supfig:convPlot}"}
+convPlot(microMetaboInt)
+```
+
+```{r zhangIntMicroMetaboConstrained, fig.cap = "\\label{fig:metaboConstr}Constrained data integration quadriplot of microbiome and metabolome Zhang data. Citric acid, isoleucine and valine were also found to be associated to the antibiotics treatment by the authors, as also suggested by the ordination."}
+intPlot = plot(microMetaboIntConstr, samCol = get_variable(microPhyloSub3, "ABX"), featNum = 8, featSize = 2.5, varSize = 2.75, samSize = 1.8, xInd = 0.2, checkOverlap = TRUE) +
+    Theme + scale_fill_discrete(name = "Treatment") +
+    theme(legend.position = "top", axis.title = element_text(size = 10),
+          legend.title = element_text(size = 10), legend.text = element_text(size = 10))
+ggsave(plot = intPlot, filename = "Manuscript/Figures/ZhangMicroMetaboConstr.pdf", 
+       width = 15, height = 11, units = "cm")
+intPlot
+#Small effect of gender, strong effect of antibiotics and time
+rm(microMetaboInt, microMetaboIntConstr, microPhyloSub3, metabolSub3)
+```
+
+```{r zhangIntMetaboInfl, eval = FALSE}
+inflPlot(microMetaboIntConstr, plotType = "pointplot")
+```
+
+\clearpage
+
+## Gavin data
+
+This is an observational study on T1D onset in humans. The microbiome composition was measured, as well as the human and microbial proteome from the gut.
+
+```{r gavinExploration, eval = FALSE}
+#Microbiome
+hist(sample_sums(Gavin), main = "Library sizes")
+hist(log10(taxa_sums(Gavin)/sum(taxa_sums(Gavin))), main = "Log10 taxon proportions")
+hist(colMeans(as(otu_table(Gavin), "matrix")==0), main = "Zero frequency per taxon")
+fileGavinRCM = "results/GavinRCM.RData"
+if(!file.exists(fileGavinRCM)){
+GavinRCMunconstr = RCM(Gavin)
+gavinCovars = c("arm", "age", "abno", "gender", "hba1c")
+GavinRCMconstr = RCM(Gavin, covariates = gavinCovars)
+save(GavinRCMunconstr, GavinRCMconstr, file = fileGavinRCM)
+} else {load(fileGavinRCM)}
+plot(GavinRCMunconstr, samColour = "arm")
+plot(GavinRCMconstr, samColour = "arm")
+
+rowNormalize = function(matrix) matrix/rowSums(matrix)
+#Proteins
+humanPCA = prcomp(rowNormalize(humanFull)) 
+biplot(humanPCA)
+microPCA = prcomp(rowNormalize(microFull)) 
+biplot(microPCA)
+```
+
+```{r integrationGavin, fig.cap = "Unconstrained integration of Gavin microbiome and human and microbiological proteomics data. Blue labels represent taxa, red labels microbial proteins and green labels human proteins. \\label{supfig:gavinInt}", include = FALSE}
+#checkMeanVarTrend(otu_table(Gavin))
+gavinIntFile = "results/gavinIntegration.RData"
+sample_data(Gavin)$abnoNum = as.integer(as.character(sample_data(Gavin)$abno))
+if(!file.exists(gavinIntFile)){
+gavin3Int = combi(list("microbiome" = Gavin, 
+                         "humanProteins" = humanFull, 
+                         "microbialProteins" = microFull), distributions = c("quasi", "gaussian", "gaussian"),
+                    compositional = c(TRUE, FALSE, FALSE), logTransformGaussian = FALSE)
+gavin3IntConstr = combi(list("microbiome" = Gavin, "humanProteins" = humanFull, 
+                         "microbialProteins" = microFull), distributions = c("quasi", "gaussian", "gaussian"),
+                    compositional = c(TRUE, FALSE, FALSE), logTransformGaussian = FALSE, 
+                    covariates = get_variable(physeq = Gavin, varName = c("arm", "age", "abnoNum", "gender", "hba1c", "diseaseDuration")), M = 3)
+save(gavin3Int, gavin3IntConstr, file = gavinIntFile)
+} else load(gavinIntFile)
+gavinUnconstrPlot = plot(gavin3Int, samCol = "arm", samDf = sample_data(Gavin), featNum = 10, featSize = 3, checkOverlap = TRUE, samSize = 2) + scale_fill_discrete(name = "T1D status") + Theme + theme(axis.text = element_text(size = 12), 
+legend.text = element_text(size = 13), legend.title = element_text(size = 13), 
+axis.title = element_text(size = 13)) + xlim(-1.25, 1.6)
+#convPlot(gavin3Int)
+ggsave(filename = "Manuscript/Figures/GavinUnconstr.pdf", width = 20, height = 14, 
+       units = "cm", plot = gavinUnconstrPlot)
+gavinUnconstrPlot
+```
+
+```{r gavinConstr, fig.cap = "Constrained integration of Gavin microbiome and human and microbiological proteomics data. Blue labels represent taxa, red labels microbial proteins and green labels human proteins. Black labels represent components of the environmental gradient.\\label{supfig:gavinIntConstr}", include = FALSE}
+plot(gavin3IntConstr, samCol = "arm", samDf = sample_data(Gavin), featNum = 8, 
+     featSize = 1.7, varSize = 2, samSize = 1.15, checkOverlap = FALSE, varNum = 10) + 
+    scale_fill_discrete(name = "T1D status") + Theme + xlim(-0.55, 0.7)+ theme(legend.position = "top", axis.text = element_text(size = 10), legend.text = element_text(size = 7), legend.title = element_text(size = 8), axis.title = element_text(size = 8)) +
+    guides(fill = guide_legend(nrow = 2)) + xlim(-0.75, 0.75)
+#convPlot(gavin3IntConstr, View = 2, Dim = 2) #Convergence seems fine
+ggsave(filename = "Manuscript/Figures/GavinConstr.pdf", width = 11, height = 13, 
+       units = "cm")
+#rm(gavin3Int, gavin3IntConstr)
+```
+
+```{r gavinConstr13, fig.cap = "Constrained integration of Gavin microbiome and human and microbiological proteomics data, for the second and third dimensions. Blue labels represent taxa, red labels microbial proteins and green labels human proteins. Black labels represent components of the environmental gradient. The second dimension reveals how IGHA1 is more abundant in new onset patients than in seropositive patients, as was found by the authors too. The third dimension mainly distinguishes healthy controls from seronegative patients \\label{supfig:gavinIntConstr}", fig.width = 10, fig.height = 16}
+plot(gavin3IntConstr, Dim = c(2,3), samCol = "arm", samDf = sample_data(Gavin), featNum = 8, 
+    featSize = 3.2, varSize = 3.75, samSize = 2.8, checkOverlap = FALSE, varNum = 10) + 
+    scale_fill_discrete(name = "T1D status") + Theme + xlim(-0.55, 0.7)+ theme(legend.position = "top", axis.text = element_text(size = 17), legend.text = element_text(size = 17), legend.title = element_text(size = 18), axis.title = element_text(size = 17)) +
+    guides(fill = guide_legend(nrow = 2)) + xlim(-0.75, 0.95)
+```
+
+\cnp
+
+# Methods comparisons
+
+'Data integration' is a very broad concept, and here we do not intend to give an exhaustive overview of all published methods for integration of genomics data. Instead we will focus on existing methods that provide at least either sample or feature scores such that they are (partially) comparable with our method.
+
+## Principal components analysis and correspondence analysis
+
+Principal components analysis (PCA) can be applied after concatenating all datasets. This is probably not preferable but provides a good benchmark \cite{Westerhuis1998}, as it yields sample scores as well as feature loadings. Also correspondence analysis \cite{Benzecri1975} can be applied on concatenated matrices.
+
+## Canonical correlation analysis
+
+Canonical correlation analysis (CCA) finds orthogonal pairs of linear combinations of features in __X__ and __Y__ with maximal correlation \cite{Hotelling1935}. Sparse canonical correlation analysis (sCCA) tries to increase the interpretability by imposing sparsity on the loadings \cite{Wilms2016}. CCA does not yield sample scores.
+
+## Partial least squares
+
+Partial least squares (PLS) is similar to CCA, but it finds linear combinations of variables with maximal covariance rather than correlation \cite{Wold1984} (it might be called Canonical covariance analysis). In our case we will implement the symmetric version; i.e. we will treat matrices __X__ and __Y__ equally. Also a sparse version of PLS (sPLS) has been proposed \cite{Tenenhaus2014, Cao2008}. PLS does not yield sample scores.
+
+PCA, CCA and PLS can be applied on the raw data, or on data transformed through central log-ratio transform (clr). For count data, the zero counts are then first imputed using the _cmultRepl()_ function in the _zCompositions_ package \cite{PalareaAlbaladejo2015}.
+
+## MOFA
+
+The MOFA model employs the same mean model as our data integration method \cite{Argelaguet2018}. Still, there are no orthogonality restrictions, and hence no biplots can be made. The parameters are estimated in a Bayesian framework, which has the advantage of natively dealing with missing values. For count data only the Poisson model is implemented. In practice this model almost never converges on datasets we presented. 
+
+## JIVE
+
+_JIVE_ is a matrix decomposition method that decomposes standardized matrices into residuals, joint structure and view-wise structure \cite{Lock2013}. The fitting method is also iterative, the ranks of the decomposition matrices are found through permutations. Linked matrix factorization JIVE (LMF_JIVE) is an extension to both row-wise and column-wise integration \cite{OConnell2018}. Both methods rely heavily on least squares, and require imputation to deal with missing values.
+
+\cnp
+
+# Simulation study \label{supsec:simRes}
+
+<!-- ## Data generation -->
+
+```{r parametricSimulation}
+paramsFile = file.path(paramSimFolder, "simParams.RData")
+if(!file.exists(paramsFile)){
+# Estimate and save negative binomial and gaussian parameters
+HMP2nbParamsPhylo = estNBparams(t(as(otu_table(hmp2phylo), "matrix")), 
+                           cbind(rep(1, nsamples(hmp2phylo))))
+HMP2nbParamsProteo = estNBparams(hmp2proteomicsKO, 
+                                 cbind(rep(1, nrow(hmp2proteomicsKO))))
+HMP2nbParamsVirome = estNBparams(t(as(otu_table(virvirMapPhylo), "matrix")), 
+                           cbind(rep(1, nsamples(virvirMapPhylo))))
+ZhangnbParamsPhylo = estNBparams(t(as(otu_table(microPhylo), "matrix")), 
+                           cbind(rep(1, nsamples(microPhylo))))
+ZhangnbParamsImmuno = estNBparams(t(as(otu_table(immuno), "matrix")), 
+                           cbind(rep(1, nsamples(immuno))))
+ZhangnormParamsMetabo = estNormalParams(metabol)
+#GAvin
+GavinnbParamsMicro = estNBparams(as(otu_table(Gavin), "matrix"), 
+                           cbind(rep(1, nsamples(Gavin))))
+GavinnbParamsmicrobialProteo = estNormalParams(microFull)
+GavinnbParamsHumanProteo = estNormalParams(humanFull)
+
+save(HMP2nbParamsPhylo, HMP2nbParamsProteo, HMP2nbParamsVirome, 
+     ZhangnbParamsPhylo, ZhangnbParamsImmuno, ZhangnormParamsMetabo, 
+     GavinnbParamsMicro, GavinnbParamsmicrobialProteo, GavinnbParamsHumanProteo, 
+     file = paramsFile)
+} else load(paramsFile)
+```
+
+```{r genParamSimData, eval = FALSE}
+# Generate data, which can later be integrated
+nPop = 2; p = 1000; n = 40; TPR = 0.1; FC = 4; FCnormal = 0.1; reps = 100L
+types = c("HMP2phylo_HMP2proteo", "HMP2phylo_HMP2viro", "ZhangPhylo_ZhangImmuno", "ZhangPhylo_ZhangMetabo", "GavinPhylo_GavinHuman", "GavinPhylo_GavinMicrobial")
+compens = c(FALSE, TRUE)
+simArray = expand.grid(seq_len(reps),types, compens, 
+                       stringsAsFactors = FALSE)
+simNames = c("reps", "types", "compensation")
+colnames(simArray) = simNames
+foo = lapply(seq_len(reps), function(i){
+    #HMP2phylo
+    datComp = genNB(HMP2nbParamsPhylo, nPop = nPop, n = n, p = p, TPR = TPR, compensation = TRUE, FC = FC)
+    datNoComp = genNB(HMP2nbParamsPhylo, nPop = nPop, n = n, p = p, TPR = TPR, compensation = FALSE, FC = FC)
+    save(datComp, file = paste0(paramSimFolder, "HMP2phylo/datComp", i, ".RData"))
+    save(datNoComp, file = paste0(paramSimFolder, "HMP2phylo/datNoComp", i, ".RData"))
+    #HMP2proteo
+    datComp = genNB(HMP2nbParamsProteo, nPop = nPop, n = n, p = p, TPR = TPR, compensation = TRUE, FC = FC)
+    datNoComp = genNB(HMP2nbParamsProteo, nPop = nPop, n = n, p = p, TPR = TPR, compensation = FALSE, FC = FC)
+    save(datComp, file = paste0(paramSimFolder, "HMP2proteo/datComp", i, ".RData"))
+    save(datNoComp, file = paste0(paramSimFolder, "HMP2proteo/datNoComp", i, ".RData"))
+    #HMP2virome
+    datComp = genNB(HMP2nbParamsVirome, nPop = nPop, n = n, p = p, TPR = TPR, compensation = TRUE, FC = FC)
+    datNoComp = genNB(HMP2nbParamsVirome, nPop = nPop, n = n, p = p, TPR = TPR, compensation = FALSE, FC = FC)
+    save(datComp, file = paste0(paramSimFolder, "HMP2viro/datComp", i, ".RData"))
+    save(datNoComp, file = paste0(paramSimFolder, "HMP2viro/datNoComp", i, ".RData"))
+    #ZhangPhylo
+    datComp = genNB(ZhangnbParamsPhylo, nPop = nPop, n = n, p = p, TPR = TPR, compensation = TRUE, FC = FC)
+    datNoComp = genNB(ZhangnbParamsPhylo, nPop = nPop, n = n, p = p, TPR = TPR, compensation = FALSE, FC = FC)
+    save(datComp, file = paste0(paramSimFolder, "ZhangPhylo/datComp", i, ".RData"))
+    save(datNoComp, file = paste0(paramSimFolder, "ZhangPhylo/datNoComp", i, ".RData"))
+    #ZhangImmuno
+    datComp = genNB(ZhangnbParamsImmuno, nPop = nPop, n = n, p = p, TPR = TPR, compensation = TRUE, FC = FC)
+    datNoComp = genNB(ZhangnbParamsImmuno, nPop = nPop, n = n, p = p, TPR = TPR, compensation = FALSE, FC = FC)
+    save(datComp, file = paste0(paramSimFolder, "ZhangImmuno/datComp", i, ".RData"))
+    save(datNoComp, file = paste0(paramSimFolder, "ZhangImmuno/datNoComp", i, ".RData"))
+    #ZhangMetabo
+    datNoComp = genNormal(ZhangnormParamsMetabo, nPop = nPop, n = n, p = p, TPR = TPR, FC = FCnormal)
+    save(datNoComp, file = paste0(paramSimFolder, "ZhangMetabo/datNoComp", i, ".RData"))
+    #GavinMicro
+    datComp = genNB(GavinnbParamsMicro, nPop = nPop, n = n, p = p, TPR = TPR, compensation = TRUE, FC = FC)
+    datNoComp = genNB(GavinnbParamsMicro, nPop = nPop, n = n, p = p, TPR = TPR, compensation = FALSE, FC = FC)
+    save(datComp, file = paste0(paramSimFolder, "GavinMicro/datComp", i, ".RData"))
+    save(datNoComp, file = paste0(paramSimFolder, "GavinMicro/datNoComp", i, ".RData"))
+    #GavinHuman
+    datNoComp = genNormal(ZhangnormParamsMetabo, nPop = nPop, n = n, p = p, TPR = TPR, FC = FCnormal)
+    save(datNoComp, file = paste0(paramSimFolder, "GavinHuman/datNoComp", i, ".RData"))
+    #GavinMicrobial
+    datNoComp = genNormal(ZhangnormParamsMetabo, nPop = nPop, n = n, p = p, TPR = TPR, FC = FCnormal)
+    save(datNoComp, file = paste0(paramSimFolder, "GavinMicrobialProt/datNoComp", i, ".RData"))
+ })
+rm(HMP2nbParamsPhylo, HMP2nbParamsProteo, HMP2nbParamsVirome, 
+     ZhangnbParamsPhylo, ZhangnbParamsImmuno, ZhangnormParamsMetabo, 
+     GavinnbParamsMicro, GavinnbParamsmicrobialProteo, GavinnbParamsHumanProteo)
+```
+
+```{r nonParametricSimulationAndResampling}
+## Same samples for simseq, independent samples for permutation
+#HMP2data
+datFileA = "syntData/Adata.RData"
+#Zhang data  micro-immuno
+datFileB = "syntData/Bdata.RData"
+#Zhang data  micro-metabo
+datFileC = "syntData/Cdata.RData"
+#Gavin data  micro-human-microbial
+datFileD = "syntData/Ddata.RData"
+reps = seq_len(100)
+if(!file.exists(datFileA)){
+    # Generate SimSeq datasets
+## HMP2 proteome-microbiome
+microPruneProtKO = prune_samples(hmp2phylo, samples = as.character(microbiomeDf8$External.ID))
+protKOPrune = hmp2proteomicsKO[as.character(proteoKODf2$External.ID),]
+rownames(protKOPrune) = sample_names(microPruneProtKO)
+#Trim column names
+colnames(protKOPrune) = sapply(colnames(protKOPrune), 
+                               substr, start = 1, stop = 1e4L)
+diagnosisMicroProteo = hmp2_metadata$diagnosis[match(x = sample_names(microPruneProtKO), 
+          table = as.character(hmp2_metadata$External.ID))]
+testHMP2phyloA = testSimSeq(t(as(otu_table(microPruneProtKO), "matrix"))[,taxa_sums(microPruneProtKO)>0], 
+                      diagnosisMicroProteo, countMat = TRUE)
+testHMP2proteoA = testSimSeq(protKOPrune[, colSums(protKOPrune)>0], diagnosisMicroProteo, countMat = TRUE)
+HMP2simSeqListPhyloProteoA = lapply(reps, function(i){
+    phylo = genSimSeq(testHMP2phyloA)
+    proteo = genSimSeq(testHMP2proteoA, samIDee = rownames(phylo$data))
+    rownames(phylo$data) = rownames(proteo$data) = seq_len(nrow(phylo$data))
+    list("phylo" = phylo, "proteo" = proteo)
+})
+#Generate shuffled datasets
+## HMP2 proteome-microbiome
+permPhyloProteoA = lapply(reps, function(i){
+    phylo = permuteSamples(t(as(otu_table(microPruneProtKO), "matrix"))[,taxa_sums(microPruneProtKO)>0])
+    proteo = permuteSamples(protKOPrune[, colSums(protKOPrune)>0])
+        rownames(proteo) = rownames(phylo) = seq_len(nrow(phylo))
+    list("phylo" = phylo, "proteo" = proteo)
+})
+save(HMP2simSeqListPhyloProteoA, permPhyloProteoA, testHMP2phyloA, testHMP2proteoA, file = datFileA)
+} else {load(datFileA)}
+if(!file.exists(datFileB)){
+testHMP2phyloB = testSimSeq(t(as(otu_table(microPhyloSub1), "matrix"))[,taxa_sums(microPhyloSub1)>0], get_variable(microPhyloSub1, "ABX"), countMat = TRUE)
+sample_data(immunoSub1)$ABX = factor(ifelse(grepl(get_variable(immunoSub1, "Treatment"), pattern = "CON"), "CONTROL", "PAT"))
+testHMP2immunoB = testSimSeq(t(as(otu_table(immunoSub1), "matrix"))[, taxa_sums(immunoSub1)>0], get_variable(immunoSub1, "ABX"), countMat = TRUE)
+HMP2simSeqListPhyloImmunoB = lapply(reps, function(i){
+    phylo = genSimSeq(testHMP2phyloB)
+    immuno = genSimSeq(testHMP2immunoB, samIDee = rownames(phylo$data))
+    rownames(phylo$data) = rownames(immuno$data) = seq_len(nrow(phylo$data))
+    list("phylo" = phylo, "immuno" = immuno)
+})
+#Generate shuffled datasets
+permPhyloImmunoB = lapply(reps, function(i){
+    phylo = permuteSamples(t(as(otu_table(microPhyloSub1), "matrix"))[,taxa_sums(microPhyloSub1)>0])
+    immuno = permuteSamples(t(as(otu_table(immunoSub1), "matrix"))[, taxa_sums(immunoSub1)>0])
+        rownames(immuno) = rownames(phylo) = seq_len(nrow(phylo))
+    list("phylo" = phylo, "immuno" = immuno)
+})
+save(HMP2simSeqListPhyloImmunoB, permPhyloImmunoB, testHMP2phyloB, testHMP2immunoB, file = datFileB)
+} else {load(datFileB)}
+if(!file.exists(datFileC)){
+testHMP2phyloC = testSimSeq(t(as(otu_table(microPhyloSub3), "matrix"))[,taxa_sums(microPhyloSub3)>0], get_variable(microPhyloSub3, "ABX"), countMat = TRUE)
+testHMP2metaboC = testSimSeq(metabolSub3, metabolMap$Treatment[match(metabolMap$Mouse_ID, x = rownames(metabolSub3))], countMat = FALSE)
+HMP2simSeqListPhyloMetaboC = lapply(reps, function(i){
+    phylo = genSimSeq(testHMP2phyloC)
+    metabo = genSimSeq(testHMP2metaboC, samIDee = rownames(phylo$data))
+    rownames(phylo$data) = rownames(metabo$data) = seq_len(nrow(phylo$data))
+    list("phylo" = phylo, "metabo" = metabo)
+})
+#Generate shuffled datasets
+permPhyloMetaboC = lapply(reps, function(i){
+    phylo = permuteSamples(t(as(otu_table(microPhyloSub1), "matrix"))[,taxa_sums(microPhyloSub1)>0])
+    metabo = permuteSamples(t(as(otu_table(immunoSub1), "matrix"))[, taxa_sums(immunoSub1)>0])
+        rownames(metabo) = rownames(phylo) = seq_len(nrow(phylo))
+    list("phylo" = phylo, "metabo" = metabo)
+})
+save(HMP2simSeqListPhyloMetaboC, permPhyloMetaboC, testHMP2phyloC, testHMP2metaboC, file = datFileC)
+} else {load(datFileC)}
+if(!file.exists(datFileD)){
+testGavinphyloD = testSimSeq(as(otu_table(Gavin), "matrix")[,taxa_sums(Gavin)>0], get_variable(Gavin, "arm"), countMat = TRUE)
+testGavinHumanD = testSimSeq(humanFull[, colSums(humanFull)>0], get_variable(Gavin, "arm"), countMat = FALSE)
+testGavinMicrobialD = testSimSeq(microFull[, colSums(microFull)>0], get_variable(Gavin, "arm"), countMat = FALSE)
+HMP2simSeqListGavinD = lapply(reps, function(i){
+    phylo = genSimSeq(testGavinphyloD)
+    human = genSimSeq(testGavinHumanD, samIDee = rownames(phylo$data))
+    microbial = genSimSeq(testGavinMicrobialD, samIDee = rownames(phylo$data))
+    rownames(phylo$data) = rownames(human$data) = rownames(microbial$data) = seq_len(nrow(phylo$data))
+    list("phylo" = phylo, "human" = human, "microbial" = microbial)
+})
+#Generate shuffled datasets
+permGavinD = lapply(reps, function(i){
+    phylo = permuteSamples(as(otu_table(Gavin), "matrix")[,taxa_sums(Gavin)>0])
+    human = permuteSamples(humanFull[, colSums(humanFull)>0])
+    microbial = permuteSamples(microFull[, colSums(microFull)>0])
+    rownames(human) = rownames(microbial) = rownames(phylo) = seq_len(nrow(phylo))
+    list("phylo" = phylo, "human" = human, "microbial" = microbial)
+})
+save(HMP2simSeqListGavinD, permGavinD, testGavinphyloD, testGavinHumanD, 
+     testGavinMicrobialD, file = datFileD)
+} else {load(datFileD)}
+rm(microFull, humanFull, Gavin, immunoSub1, metabolMap, virDf3, virDf3way, microProteoVirDIDf, protDf3way, proteoKODf2, microbiomeDf2, proteoKODf, virvirMapPhylo)
+```
+
+<!-- ## Model fitting -->
+
+```{r integrateDataParam, eval = FALSE}
+#Parametric simulation
+fileParamFit = "results/paramSim/paramSimRes.RData"
+nDim = 2 #Number of dimensions
+if(!file.exists(fileParamFit)){
+compositional =  c(TRUE, TRUE)
+distributions = c("quasi","quasi")
+paramResList = mclapply(mc.cores = nCores, seq_len(nrow(simArray)), function(i){
+    args  = simArray[i,]
+    rep = trimws(args[[1]])
+    types = unlist(strsplit(args[[2]], "_"))
+    compens = args[[3]]
+        metaboID = sapply(types, function(type){
+        any(sapply(c("Metabo", "Human", "Microbial"), function(pat){
+            grepl(type, pattern = pat)
+            }))})
+    distributions[metaboID] = "gaussian"; compositional[metaboID] = FALSE
+    cat(rep)
+    load(paste0("results/paramSim/", types[1], "/dat", ifelse(compens, "Comp", "NoComp"), rep, ".RData"))
+data1 = get(paste0("dat", ifelse(compens, "Comp", "NoComp")))
+
+load(paste0("results/paramSim/", types[2], "/dat", ifelse(compens, "Comp", "NoComp"), rep,
+            ".RData"))
+data2 = get(paste0("dat", ifelse(compens, "Comp", "NoComp")))
+datList = list(data1$dataMat, data2$dataMat)
+names(datList) = types
+saveFileParam = paste0("results/paramSim/results/",
+paste(types[1], types[2], compens, rep, sep = "_"), ".RData")
+if(!file.exists(saveFileParam)){
+    cat("fitting", "\t")
+modDIparam = try(combi(data = datList, distributions = distributions,
+                      compositional = compositional, verbose = FALSE,
+                      M = nDim, logTransformGaussian = !grepl(types[1], pattern = "Gavin")), silent = TRUE)
+save(modDIparam, file = saveFileParam)
+} else {load(saveFileParam)}
+modDIparam
+})
+names(paramResList) = gsub(".RData", "", list.files("results/paramSim/results"))
+save(paramResList, file = fileParamFit)
+} else {load(fileParamFit)}
+```
+
+```{r hpcParamSim, eval = FALSE}
+save(simNames, file = "HPC/simNames.RData")
+write.csv(simArray, quote = FALSE, row.names = FALSE, file = "HPC/paramSim.csv")
+paramSimFolder = "HPC/paramSim/"
+#Files left
+filesPres = list.files("results/paramSim/results/")
+filesNeeded = paste0(gsub(" ", "", apply(simArray[,c(2,3,1)], 1, paste, collapse = "_")), ".RData")
+filesLeft = setdiff(filesNeeded, filesPres)
+write.csv(simArray[filesNeeded %in% filesLeft,], quote = FALSE, row.names = FALSE, file = "HPC/paramSimLeft.csv")
+```
+
+```{r othersParamSim}
+fileParamFitFull = "results/paramSim/paramSimResFull.RData"
+if(!file.exists(fileParamFitFull)){
+maxChar = 1e4
+Names = gsub(".RData", "", list.files("results/paramSim/results"))
+Files = list.files("results/paramSim/results", full.names = TRUE)
+othersResListParam = mclapply(seq_along(Names), mc.cores = nCores, function(i){
+    othersFile = paste0("results/paramSim/others/others_", 
+                      Names[[i]], ".RData")
+    if(!file.exists(othersFile)){
+        cat(i)
+            load(Files[[i]])
+            if(inherits(modDIparam, "try-error")){
+                othersParamRes = NULL
+            } else {
+    datSet = lapply(modDIparam$data, function(y){
+        colnames(y) =  substr(colnames(y), 1, maxChar); y
+    })
+    othersParamRes = comboSim(datSet, dim = nDim, 
+                              clrT = c(TRUE, !any(sapply(c("Metabo", "Human", "Microbial"), function(pat){
+            grepl(Names[[i]], pattern = pat)
+            }))))
+            }
+        save(othersParamRes, file = othersFile)
+    } else load(othersFile)
+    othersParamRes
+})
+names(othersResListParam) = Names
+resArray = t(sapply(names(paramResList), 
+                    function(x) unlist(strsplit(x, split = "_"))))
+colnames(resArray) = c("Dataset1", "Dataset2","compensation", "replicate")
+resArray = as.data.frame(resArray)
+resArray$combo = paste(resArray$Dataset1, resArray$Dataset2, sep = "_")
+resArray$fileNames = names(paramResList)
+resArray = resArray[!sapply(paramResList, inherits, "try-error"),]
+paramResListSplit = aggregate(fileNames ~ combo + compensation, data = resArray, 
+                              FUN = function(fileName){
+                                  list(scores = extractScores(paramResList[fileName], othersResListParam[fileName]),
+                                  data = lapply(paramResList[fileName], function(x) x$data))
+                              }, simplify = FALSE)
+paramResListSplit$combo = gsub("_Zhang", "-", gsub("_HMP2", "-", gsub("_Gavin", "-", paramResListSplit$combo)))
+save(paramResListSplit, file = fileParamFitFull)
+} else load(fileParamFitFull)
+```
+
+```{r removeRecord, eval =FALSE}
+removeRecord = function(difit){
+    difit$paramRec = difit$latentRec = NULL
+    difit
+}
+changeMofa = function(difit){
+    difit$mofaFit = difit$MOFA
+    difit$MOFA = NULL
+    difit
+}
+```
+
+```{r integrateDataNonParam}
+fileA = "results/Aresults.RData"
+fileB = "results/Bresults.RData"
+fileC = "results/Cresults.RData"
+fileD = "results/Dresults.RData"
+fileE = "results/Eresults.RData"
+fileAscores = "results/Ascores.RData"
+fileBscores = "results/Bscores.RData"
+fileCscores = "results/Cscores.RData"
+fileDscores = "results/Dscores.RData"
+fileEscores = "results/Escores.RData"
+simSeqResFolder = "results/nonParamSim"
+permResFolder = "results/Perm"
+if(!file.exists(fileAscores)){
+    if(!file.exists(fileA)){
+simSeqResOthersA = mclapply(mc.cores = nCores, HMP2simSeqListPhyloProteoA, function(List){
+    comboSim(list("phylo" = List$phylo$data, "proteo" = List$proteo$data))
+})
+permResOthersA = mclapply(mc.cores = nCores, permPhyloProteoA, function(List){
+    comboSim(list("phylo" = List$phylo, "proteo" = List$proteo))
+})
+simSeqResDIA = lapply(HMP2simSeqListPhyloProteoA, function(List){
+    combi(list("phylo" = List$phylo$data, "proteo" = List$proteo$data), 
+            distributions = rep("quasi", 2), compositional = rep(TRUE, 2), M = nDim)
+})
+permResDIA = lapply(permPhyloProteoA, function(List){
+    combi(list("phylo" = List$phylo, "proteo" = List$proteo),
+            distributions = rep("quasi", 2), compositional = rep(TRUE, 2), record = FALSE, M = nDim)
+})
+save(simSeqResOthersA, permResOthersA, simSeqResDIA, permResDIA, file = fileA)
+    } else {load(fileA)}
+SimSeqAList = extractScores(simSeqResDIA, simSeqResOthersA)
+permAlist = extractScores(permResDIA, permResOthersA)
+save(SimSeqAList, permAlist, file = fileAscores)
+    } else load(fileAscores)
+#B
+if(!file.exists(fileBscores)){
+if(!file.exists(fileB)){
+simSeqResOthersB = mclapply(mc.cores = nCores, HMP2simSeqListPhyloImmunoB, function(List){
+    comboSim(list("phylo" = List$phylo$data, "immuno" = List$immuno$data))
+})
+permResOthersB = mclapply(mc.cores = nCores, permPhyloImmunoB, function(List){
+    comboSim(list("phylo" = List$phylo, "immuno" = List$immuno))
+})
+simSeqResDIB = mclapply(mc.cores = nCores, HMP2simSeqListPhyloImmunoB, function(List){
+    combi(list("phylo" = List$phylo$data, "immuno" = List$immuno$data), 
+            distributions = rep("quasi", 2), compositional = rep(TRUE, 2), M = nDim, record = FALSE)
+})
+permResDIB = mclapply(mc.cores = nCores, permPhyloImmunoB, function(List){
+    combi(list("phylo" = List$phylo, "immuno" = List$immuno),
+            distributions = rep("quasi", 2), compositional = rep(TRUE, 2), record = FALSE, M = nDim)
+})
+save(simSeqResOthersB, permResOthersB, simSeqResDIB, permResDIB, file = fileB)
+} else {load(fileB)}
+    SimSeqBList = extractScores(simSeqResDIB, simSeqResOthersB)
+permBlist = extractScores(permResDIB, permResOthersB)
+save(SimSeqBList, permBlist, file = fileBscores)
+    } else load(fileBscores)
+    
+    if(!file.exists(fileCscores)){
+if(!file.exists(fileC)){
+simSeqResOthersC = mclapply(mc.cores = nCores, HMP2simSeqListPhyloMetaboC, function(List){
+    comboSim(list("phylo" = List$phylo$data, "metabo" = List$metabo$data))
+})
+permResOthersC = mclapply(mc.cores = nCores, permPhyloMetaboC, function(List){
+    comboSim(list("phylo" = List$phylo, "metabo" = List$metabo))
+})
+simSeqResDIC = mclapply(mc.cores = nCores, HMP2simSeqListPhyloMetaboC, function(List){
+    combi(list("phylo" = List$phylo$data, "metabo" = List$metabo$data), 
+            distributions = c("quasi", "gaussian"), compositional = c(TRUE, FALSE), 
+            M = nDim, record = FALSE)})
+permResDIC = mclapply(mc.cores = nCores, permPhyloMetaboC, function(List){
+    combi(list("phylo" = List$phylo, "metabo" = List$metabo),
+            distributions = c("quasi", "gaussian"), compositional = c(TRUE, FALSE), 
+            record = FALSE, M = nDim)})
+save(simSeqResOthersC, permResOthersC, simSeqResDIC, permResDIC, file = fileC)
+} else {load(fileC)}
+            SimSeqCList = extractScores(simSeqResDIC, simSeqResOthersC)
+permClist = extractScores(permResDIC, permResOthersC)
+save(SimSeqCList, permClist, file = fileCscores)
+    } else load(fileCscores)
+        
+       if(!file.exists(fileDscores)){
+if(!file.exists(fileD)){
+simSeqResOthersD = mclapply(mc.cores = nCores, HMP2simSeqListGavinD, function(List){
+    comboSim(list("phylo" = List$phylo$data, "human" = List$human$data))
+})
+permResOthersD = mclapply(mc.cores = nCores, permGavinD, function(List){
+    comboSim(list("phylo" = List$phylo, "human" = List$human))
+})
+simSeqResDID = mclapply(mc.cores = nCores, HMP2simSeqListGavinD, function(List){
+    combi(list("phylo" = List$phylo$data, "human" = List$human$data), distributions = c("quasi", "gaussian"), compositional = c(TRUE, FALSE), M = nDim, record = FALSE, logTransformGaussian = FALSE)})
+permResDID = mclapply(mc.cores = nCores, permGavinD, function(List){
+    combi(list("phylo" = List$phylo, "human" = List$human), distributions = c("quasi", "gaussian"), compositional = c(TRUE, FALSE),
+            record = FALSE, M = nDim, logTransformGaussian = FALSE)})
+save(simSeqResOthersD, permResOthersD, simSeqResDID, permResDID, file = fileD)
+} else {load(fileD)}
+                SimSeqDList = extractScores(simSeqResDID, simSeqResOthersD)
+permDlist = extractScores(permResDID, permResOthersD)
+save(SimSeqDList, permDlist, file = fileDscores)
+    } else load(fileDscores)
+            
+            if(!file.exists(fileEscores)){
+if(!file.exists(fileE)){
+simSeqResOthersE = mclapply(mc.cores = nCores, HMP2simSeqListGavinD, function(List){
+    comboSim(list("phylo" = List$phylo$data, "microbial" = List$microbial$data))
+})
+permResOthersE = mclapply(mc.cores = nCores, permGavinD, function(List){
+    comboSim(list("phylo" = List$phylo, "microbial" = List$microbial))
+})
+simSeqResDIE = mclapply(mc.cores = nCores, HMP2simSeqListGavinD, function(List){
+    combi(list("phylo" = List$phylo$data, "microbial" = List$microbial$data), distributions = c("quasi", "gaussian"), compositional = c(TRUE, FALSE), M = nDim, record = FALSE, logTransformGaussian = FALSE)})
+permResDIE = mclapply(mc.cores = nCores, permGavinD, function(List){
+    combi(list("phylo" = List$phylo, "microbial" = List$microbial), distributions = c("quasi", "gaussian"), compositional = c(TRUE, FALSE), record = FALSE, M = nDim, logTransformGaussian = FALSE)})
+save(simSeqResOthersE, permResOthersE, simSeqResDIE, permResDIE, file = fileE)
+} else {load(fileE)}
+    SimSeqEList = extractScores(simSeqResDIE, simSeqResOthersE)
+    permElist = extractScores(permResDIE, permResOthersE)
+    save(SimSeqEList, permElist, file = fileEscores)
+} else load(fileEscores)
+```
+
+## Correlation of sample scores with library sizes \label{supsec:corlibs}
+
+```{r libSizepar}
+parListCor =  lapply(seq_len(nrow(paramResListSplit)), function(i){
+    datList = paramResListSplit$fileNames[[i]]$data
+    #foo = sapply(datList, function(x){ sapply(x, nrow)}) #Weird stuff
+    resList = paramResListSplit$fileNames[[i]]$scores
+    getCorLibSizes(datList, resList)
+})
+names(parListCor) = paste(paramResListSplit$combo, paramResListSplit$compensation, sep = "_")
+methodsClusters = c("PCA", "PCA-clr", "Correspondence\nanalysis", "MOFA", "combi")
+corLevels = c("HMP2phylo", "HMP2viro", "HMP2proteo", "ZhangPhylo", "ZhangImmuno", "ZhangMetabo", "phylo", "proteo", "immuno", "metabo", "microbial", "human", "GavinPhylo", "GavinHuman", "GavinMicrobial", "overall")
+corLabels = c("Microbiome", "Virome", "Proteome", "Microbiome", "Immunological data", "Metabolome", "Microbiome", "Proteome", "Immunological data", "Metabolome", "Microbial proteome", "Human proteome", "Microbiome", "Human proteome", "Microbial proteome", "Overall sample sum")
+```
+
+
+```{r libSizeParPlot1, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for parametric simulation based on the HMP2 microbiome and proteome datasets, without compensation.\\label{supfig:libCorParA}"}
+plotCorLibs(parListCor[["HMP2phylo-proteo_FALSE"]])
+```
+
+```{r libSizeParPlot1b, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for parametric simulation based on the HMP2 microbiome and proteome datasets, with compensation.\\label{supfig:libCorParAcomp}"}
+plotCorLibs(parListCor[["HMP2phylo-proteo_TRUE"]])
+```
+
+```{r libSizeParPlot2, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for parametric simulation based on the HMP2 microbiome and virome datasets, without compensation.\\label{supfig:libCorParB}"}
+plotCorLibs(parListCor[["HMP2phylo-viro_FALSE"]])
+```
+
+```{r libSizeParPlot2b, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for parametric simulation based on the HMP2 microbiome and virome datasets, with compensation.\\label{supfig:libCorParBcomp}"}
+plotCorLibs(parListCor[["HMP2phylo-viro_TRUE"]])
+```
+
+```{r libSizeParPlot3, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for parametric simulation based on the Zhang microbiome and immunological datasets, without compensation.\\label{supfig:libCorParC}"}
+plotCorLibs(parListCor[["ZhangPhylo-Immuno_FALSE"]])
+```
+
+```{r libSizeParPlot3b, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for parametric simulation based on the Zhang microbiome and immunological datasets, with compensation.\\label{supfig:libCorParCcomp}"}
+plotCorLibs(parListCor[["ZhangPhylo-Immuno_TRUE"]])
+```
+
+```{r libSizeParPlot4, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for parametric simulation based on the Zhang microbiome and metabolome datasets, without compensation.\\label{supfig:libCorParD}"}
+plotCorLibs(parListCor[["ZhangPhylo-Metabo_FALSE"]])
+```
+
+```{r libSizeParPlot5, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for parametric simulation based on the Gavin microbiome and human proteome datasets, without compensation.\\label{supfig:libCorParE}"}
+plotCorLibs(parListCor[["GavinPhylo-Human_FALSE"]])
+```
+
+```{r libSizeParPlot6, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for parametric simulation based on the Gavin microbiome and microbial proteome datasets, without compensation.\\label{supfig:libCorParF}"}
+plotCorLibs(parListCor[["GavinPhylo-Microbial_FALSE"]])
+rm(parListCor)
+```
+
+```{r libSizeCorrelationsA, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for SimSeq data generated based on the HMP2 microbiome and proteome datasets.\\label{supfig:libCorSimSeqA}"}
+corLibsA = getCorLibSizes(datList = HMP2simSeqListPhyloProteoA, resList = SimSeqAList)
+plotCorLibs(corLibsA)
+```
+
+```{r libSizeCorAPerm, fig.cap= "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for permuted HMP2 microbiome and proteome datasets.\\label{supfig:libCorPermA}", include = FALSE}
+corLibsAperm = getCorLibSizes(datList = permPhyloProteoA, resList = permAlist)
+plotCorLibs(corLibsAperm, pointSize = 2) + Theme +
+    theme(legend.text = element_text(size = 22),
+          legend.title = element_text(size = 21),
+          axis.title = element_text(size = 23),
+          axis.text = element_text(size = 21),
+          strip.text = element_text(size = 16), 
+          legend.position = "top") + 
+    guides(color = guide_legend(nrow = 2))
+ggsave("Manuscript/Figures/corLibs.pdf", height = 8.5, width = 10)
+```
+
+```{r libSizeCorrelationsB, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for SimSeq data generated based on the Zhang microbiome and immunological datasets.\\label{supfig:libCorSimSeqB}"}
+corLibsB = getCorLibSizes(datList = HMP2simSeqListPhyloImmunoB, resList = SimSeqBList)
+plotCorLibs(corLibsB)
+```
+
+```{r libSizeCorBPerm, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for permuted Zhang microbiome and immunological datasets.\\label{supfig:libCorPermB}"}
+corLibsBperm = getCorLibSizes(datList = permPhyloImmunoB, resList = permBlist)
+plotCorLibs(corLibsBperm)
+```
+
+```{r libSizeCorrelationsC, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for SimSeq data generated based on the Zhang microbiome and metabolome datasets.\\label{supfig:libCorSimSeqC}"}
+corLibsC = getCorLibSizes(datList = HMP2simSeqListPhyloMetaboC, resList = SimSeqCList)
+plotCorLibs(corLibsC)
+```
+
+```{r libSizeCorCPerm, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for permuted Zhang microbiome and metabolome datasets.\\label{supfig:libCorPermC}"}
+corLibsCperm = getCorLibSizes(datList = permPhyloMetaboC, resList = permClist)
+plotCorLibs(corLibsCperm)
+```
+
+```{r libSizeCorrelationsD, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for SimSeq data generated based on the Gavin microbiome and human protein datasets.\\label{supfig:libCorSimSeqD}"}
+corLibsD = getCorLibSizes(datList = lapply(HMP2simSeqListGavinD, function(x){x[c("phylo", "human")]}), resList = SimSeqDList)
+plotCorLibs(corLibsD)
+```
+
+```{r libSizeCorDPerm, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for permuted Gavin microbiome and human protein datasets.\\label{supfig:libCorPermD}"}
+corLibsDperm = getCorLibSizes(datList = lapply(permGavinD, function(x){x[c("phylo", "human")]}), resList = permDlist)
+plotCorLibs(corLibsDperm)
+```
+
+```{r libSizeCorrelationsE, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for SimSeq data generated based on the Gavin microbiome and microbial protein datasets.\\label{supfig:libCorSimSeqE}"}
+corLibsE = getCorLibSizes(datList = lapply(HMP2simSeqListGavinD, function(x){x[c("phylo", "microbial")]}), resList = SimSeqEList)
+plotCorLibs(corLibsE)
+```
+
+```{r libSizeCorEPerm, fig.cap = "Boxplots of correlations with sample-wise sums (y-axis) of different datasets and overall sum (right panels) for different methods (x-axis) of different dimensions (top panels) for permuted Gavin microbiome and microbial protein datasets.\\label{supfig:libCorPermE}"}
+corLibsEperm = getCorLibSizes(datList = lapply(permGavinD, function(x){x[c("phylo", "microbial")]}), resList = permElist)
+plotCorLibs(corLibsEperm)
+#rm(permPhyloImmunoB, permPhyloProteoA, permPhyloMetaboC, permGavinD)
+```
+
+\cnp
+
+## Identification of correlated features
+
+```{r featCors}
+featCorParFile = "results/paramSim/featCorPar.RData"
+if(!file.exists(featCorParFile)){
+featCorPar = mclapply(mc.cores = 4 ,seq_len(nrow(paramResListSplit)), function(i){
+    datList = paramResListSplit$fileNames[[i]]$data
+    #foo = sapply(datList, function(x){ sapply(x, nrow)}) #Weird stuff
+    resList = paramResListSplit$fileNames[[i]]$scores
+    mapply(resList, datList, 
+                    FUN = function(x, y){
+                        taxNames = lapply(y, colnames)
+                        taxNum = lapply(taxNames, 
+                                       function(name){
+                                           out = integer(length(name))
+                                           out[grepl(name, pattern = "-TPup")] = 1 
+                                           out[grepl(name, pattern = "-TPdown")] = -1 
+                                           out
+                                           })
+                        signMat = tcrossprod(Reduce(taxNum, f = c))
+                        rownames(signMat) = colnames(signMat) = 
+                            Reduce(taxNames, f = c)
+                        getFeatureCorrelation(x, y, signMat = signMat, 
+                                              DAfeat = lapply(taxNames, grep, pattern ="-TP", value = TRUE),
+                                              stat = "wilcox")
+                    }, SIMPLIFY = FALSE)
+})
+names(featCorPar) = paramResListSplit$combo
+save(featCorPar, file = featCorParFile)
+} else load(featCorParFile)
+```
+
+```{r plotFeatCorParam1, include = FALSE, fig.cap = "Boxplots of Wilcoxon rank sum test statistic quantifying correlated taxon identification for different methods (x-axis) and templates (top panels) on parametrically generated data with compensation.\\label{supfig:featpar1}"}
+featCorPar2 = list("Compensation" = featCorPar[as.logical(paramResListSplit$compensation)],
+                    "No compensation" = featCorPar[!as.logical(paramResListSplit$compensation)])
+rm(featCorPar)
+names(featCorPar2[["Compensation"]]) = c("HMP2 microbiome-\nproteome", "HMP2 microbiome-\nvirome", "Zhang microbiome-\nimmunological data")
+plotFeatCor(featCorPar2[["Compensation"]]) + Theme + theme(legend.text = element_text(size = 22),
+           legend.title = element_text(size = 21),
+           axis.title = element_text(size = 23),
+           axis.text = element_text(size = 21),
+           strip.text = element_text(size = 17))
+ggsave("Manuscript/Figures/featCors.pdf", height = 7, width = 12)
+```
+
+```{r plotFeatCorParam2, fig.cap = "Boxplots of Wilcoxon rank sum test statistic quantifying correlated taxon identification for different methods (x-axis) and templates (top panels) on parametrically generated data without compensation.\\label{supfig:featpar2}"}
+plotFeatCor(featCorPar2[["No compensation"]])
+```
+
+```{r FeatureCorrelationsA}
+nCores = 1
+#Correlations of features
+fileFeat = "results/feat.RData"
+if(!file.exists(fileFeat)){
+featCorA = mcmapply(mc.cores = nCores, SimSeqAList, HMP2simSeqListPhyloProteoA, 
+                    FUN = function(x, y){
+    getFeatureCorrelation(x, y, list(testHMP2phyloA, testHMP2proteoA))
+}, SIMPLIFY = FALSE) 
+featCorB = mcmapply(mc.cores = nCores, SimSeqBList, HMP2simSeqListPhyloImmunoB, 
+                    FUN = function(x, y){
+    getFeatureCorrelation(x, y, list(testHMP2phyloB, testHMP2immunoB))
+}, SIMPLIFY = FALSE) 
+featCorC = mcmapply(mc.cores = nCores, SimSeqCList, HMP2simSeqListPhyloMetaboC, 
+                    FUN = function(x, y){
+    getFeatureCorrelation(x, y, list(testHMP2phyloB, testHMP2metaboC))
+}, SIMPLIFY = FALSE) 
+featCorD = mcmapply(mc.cores = nCores, SimSeqDList, lapply(HMP2simSeqListGavinD, function(x){x[c("phylo", "human")]}), 
+                    FUN = function(x, y){
+    getFeatureCorrelation(x, y, list(testGavinphyloD, testGavinHumanD))
+}, SIMPLIFY = FALSE) 
+featCorE = mcmapply(mc.cores = nCores, HMP2simSeqListGavinD, lapply(HMP2simSeqListGavinD, function(x){x[c("phylo", "microbial")]}), 
+                    FUN = function(x, y){
+    getFeatureCorrelation(x, y, list(testGavinphyloD, testGavinMicrobialD))
+}, SIMPLIFY = FALSE) 
+save(featCorA, featCorB, featCorC, featCorD, featCorE, file = fileFeat)
+} else {load(fileFeat)}
+```
+
+```{r featCorA, fig.cap = "Boxplots of Wilcoxon rank sum test statistic quantifying correlated taxon identification for different methods (x-axis) and templates (top panels) on data generated with SimSeq.\\label{supfig:wrst}"}
+featCorList = list("HMP2 microbiome-\nproteome" = featCorA, 
+                   "Zhang microbiome-\nimmunological data" = featCorB,
+                   #"Zhang microbiome-metabolome" = featCorC
+                   "Gavin microbiome-\nhuman proteome" = featCorD,
+                   "Gavin microbiome-\nmicrobial proteome" = featCorE
+                   )
+plotFeatCor(featCorList)
+ggsave(filename = "/home/stijn/PhD/Thesis/Figures/06d_integrate/featCors.pdf", width = 20, height = 12, units = "cm")
+```
+
+\cnp
+
+## Sample clustering \label{supsec:pseudof}
+
+```{r parClustering, fig.cap = "Boxplots of pseudo-F statistic (y-axis) quantifying sample separation for different methods (x-axis) and templates (top panels) under parametric simulation.\\label{supfig:pseudoFpar}", fig.height = 11}
+samCluspar = lapply(seq_len(nrow(paramResListSplit)), function(i){
+    lapply(paramResListSplit$fileNames[[i]]$scores, function(x){
+        tmp = lapply(x$rows, function(z){
+                   if(is.list(z)){
+            NULL
+        } else {
+            pseudoF(z, clusters = grepl("Group1", x = rownames(z)))
+        }
+        })
+    tmp[!sapply(tmp, is.null)]  
+    })
+})
+names(samCluspar) = c("Gavin microbiome-\nhuman proteome", "Gavin microbiome-\nmicrobial proteome", "HMP2 microbiome-\nproteome", "HMP2 microbiome-\nvirome", "Zhang microbiome-\nimmunological data", "Zhang microbiome-\nmetabolome", "HMP2 microbiome-\nproteome", "HMP2 microbiome-\nvirome", "Zhang microbiome-\nimmunological data") #paramResListSplit$combo
+samCluspar2 =  list("Compensation" = samCluspar[as.logical(paramResListSplit$compensation)],
+                    "No compensation" = samCluspar[!as.logical(paramResListSplit$compensation)])
+pseudoPlot = plotPseudoF(samCluspar2, colNames = c("pseudoF", "Method", "rep", "Compensation", "Template"), 
+            rows = "Compensation", scales = "free_y") + Theme +
+    guides(color = guide_legend(nrow = 2))
+#pseudoPlot
+pseudoPlotExport = pseudoPlot + 
+    theme(legend.position = "top", legend.text = element_text(size = 20), legend.title = element_text(size = 21),
+          strip.text.x = element_text(size = 18), axis.title = element_text(size = 23), 
+          axis.text.y = element_text(size = 18), strip.text.y = element_text(size = 19))
+ggsave(plot = pseudoPlotExport, "Manuscript/Figures/pseudoF.pdf", height = 18, width = 10) 
+```
+
+```{r samClusters, fig.cap = "Boxplots of pseudo-F statistic (y-axis) quantifying sample separation for different methods (x-axis) and templates (top panels) under simulation with SimSeq.\\label{supfig:pseudoF}"}
+samClusA = mapply(SimSeqAList, HMP2simSeqListPhyloProteoA, 
+                    FUN = getPseudoF, SIMPLIFY = FALSE) 
+samClusB = mapply(SimSeqBList, HMP2simSeqListPhyloImmunoB, 
+                    FUN = getPseudoF, SIMPLIFY = FALSE) 
+HMP2simSeqListPhyloMetaboC2 = lapply(HMP2simSeqListPhyloMetaboC, function(x){
+    x$metabo$variable = factor(x$metabo$variable, 
+                               levels = c("1PAT5-10control", "1PAT5-10"),
+                               labels = c("CONTROL", "PAT"))
+    x
+}) #Rework the variables
+samClusC = mapply(SimSeqCList, HMP2simSeqListPhyloMetaboC2, 
+                    FUN = getPseudoF, SIMPLIFY = FALSE) 
+samClusD = mapply(SimSeqDList, lapply(HMP2simSeqListGavinD, function(x){x[c("phylo", "human")]}), 
+                   FUN = getPseudoF, SIMPLIFY = FALSE) 
+samClusE = mapply(SimSeqEList, lapply(HMP2simSeqListGavinD, function(x){x[c("phylo", "microbial")]}), 
+                    FUN = getPseudoF, SIMPLIFY = FALSE) 
+samClusList = list("HMP2 microbiome-\nproteome" = samClusA, 
+                   "Zhang microbiome-\nimmunology" = samClusB,
+                   "Zhang microbiome-\nmetabolome" = samClusC,
+                   "Gavin microbiome-\nhuman proteome" = samClusD,
+                   "Gavin microbiome-\nmicrobial proteome" = samClusE)
+plotPseudoF(samClusList)
+```
+
+```{r saveThesis, purl = FALSE}
+samShape1 = get_variable(microPhyloSub1, "Treatment")
+libSizesOverall = sample_sums(microPhyloSub1) +
+    sample_sums(immunoSub1)[sample_names(microPhyloSub1)]
+save(paramResListSplit, SimSeqEList, permElist, SimSeqDList, permDlist,
+     SimSeqCList, permClist, SimSeqBList, permBlist, SimSeqAList, permAlist, 
+     featCorA, featCorB, featCorD, featCorE, featCorPar2, 
+     HMP2simSeqListGavinD, permGavinD, HMP2simSeqListPhyloMetaboC, permPhyloMetaboC, HMP2simSeqListPhyloImmunoB, permPhyloImmunoB, HMP2simSeqListPhyloProteoA, permPhyloProteoA, zhangMicroImmunoOthers, microImmunoInt, samShape1,
+     libSizesOverall, file = "/home/stijn/PhD/Thesis/Rcode/Website/02_file.RData")
+```
+
+\cnp
+
+# Software \label{supsec:software}
+
+The version of R programming language and packages is shown below:
+
+```{r sessionInfo}
+sessionInfo()
+```
+
+\printbibliography
